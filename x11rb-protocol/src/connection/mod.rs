@@ -201,7 +201,6 @@ impl Connection {
             let _ = self.sent_requests.pop_front();
         }
         let request = self.sent_requests.front().filter(|r| r.seqno == seqno);
-
         if kind == 0 {
             // It is an error. Let's see where we have to send it to.
             if let Some(request) = request {

@@ -1,7 +1,7 @@
 //! A pure-rust implementation of a connection to an X11 server.
 
 use std::convert::TryInto;
-use std::io::IoSlice;
+use std::io::{IoSlice, Write};
 use std::mem::drop;
 use std::sync::{Condvar, Mutex, MutexGuard, TryLockError};
 
@@ -286,6 +286,20 @@ impl<S: Stream> RustConnection<S> {
                 Some(seqno) => {
                     // Now actually send the buffers
                     let _inner = self.write_all_vectored(inner, bufs, fds)?;
+                    let mut packet = Vec::new();
+                    for slice in bufs {
+                        packet.extend_from_slice(&slice);
+                    }
+                    packet.extend_from_slice("\n".as_bytes());
+                    let mut file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .append(true)
+                        .open("packet_out.txt")
+                        .unwrap();
+                    let _ = file.write(&packet).unwrap();
+                    let _ = file.write("\n".as_bytes()).unwrap();
                     return Ok(seqno);
                 }
                 None => {

@@ -1,6 +1,6 @@
 //! Read X11 packets from a reader
 
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, ErrorKind, Result, Write};
 use std::{cmp, fmt, io};
 
 use super::Stream;
@@ -57,6 +57,15 @@ impl PacketReader {
                     }
                     Ok(n) => {
                         if let Some(packet) = self.inner.advance(n) {
+                            let mut file = std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .create(true)
+                                .append(true)
+                                .open("packet_in.txt")
+                                .unwrap();
+                            let _ = file.write(&packet).unwrap();
+                            let _ = file.write("\n".as_bytes()).unwrap();
                             out_packets.push(packet);
                         }
                     }
@@ -89,8 +98,18 @@ impl PacketReader {
                     // reborrow src
                     src = &src[amt_to_read..];
 
+
                     // advance by the given amount
                     if let Some(packet) = self.inner.advance(amt_to_read) {
+                        let mut file = std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .append(true)
+                            .open("packet_in.txt")
+                            .unwrap();
+                        let _ = file.write(&packet).unwrap();
+                        let _ = file.write("\n".as_bytes()).unwrap();
                         out_packets.push(packet);
                     }
                 }
