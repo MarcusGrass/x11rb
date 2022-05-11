@@ -34,7 +34,7 @@ fn print_parse<T: TryParse + std::fmt::Debug>(data: &[u8]) {
 pub struct ConnectionInner {
     /// Information about present extensions. Entries are added when a reply to a `QueryExtension`
     /// request comes in.
-    ext_info: ExtInfo,
+    pub(crate) ext_info: ExtInfo,
 
     /// The number of requests that the client already sent.
     next_client_request: u16,
@@ -67,6 +67,11 @@ impl ConnectionInner {
     /// Handle the server's Setup (or SetupFailed, SetupAuthenticate)
     pub fn server_setup(&mut self, packet: &[u8]) {
         print!("server: ");
+        if packet[0] == 0 {
+            if let Ok(setup_failed) = xproto::SetupFailed::try_parse(&packet) {
+                eprintln!("Setup failed: {:?}", String::from_utf8(setup_failed.0.reason));
+            }
+        }
         match packet[0] {
             0 => print_parse::<xproto::SetupFailed>(packet),
             1 => {
@@ -241,14 +246,14 @@ impl std::fmt::Debug for PendingReply {
 
 /// Information about known extensions.
 #[derive(Debug, Default)]
-struct ExtInfo {
+pub(crate) struct ExtInfo {
     /// A list of extension names and their information
     exts: Vec<(String, ExtensionInformation)>,
 }
 
 impl ExtInfo {
     /// Add a new extension to the state
-    fn add_extension(&mut self, name: String, info: ExtensionInformation) {
+    pub(crate) fn add_extension(&mut self, name: String, info: ExtensionInformation) {
         self.exts.push((name, info))
     }
 }

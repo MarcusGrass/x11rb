@@ -1,10 +1,13 @@
 use futures_io::{AsyncRead, AsyncWrite};
 use std::cell::RefCell;
 use std::convert::{TryFrom, TryInto};
-use std::io::Result as IOResult;
+use std::io::{Result as IOResult, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use x11rb::extension_manager::ExtensionManager;
+use x11rb::protocol::Event;
 
 use x11rb::protocol::xproto::GE_GENERIC_EVENT;
+use x11rb::x11_utils::ExtInfoProvider;
 
 use crate::connection_inner::ConnectionInner;
 use crate::forwarder::forward_with_callback;
@@ -24,7 +27,10 @@ impl Connection {
         client: impl AsyncRead + Unpin,
         server: impl AsyncWrite + Unpin,
     ) -> IOResult<()> {
-        forward_with_callback(client, server, |packet| self.parse_client_packet(packet)).await
+        forward_with_callback(client, server, |packet| {
+            self.parse_client_packet(packet, &ExtensionManager::default())
+        })
+        .await
     }
 
     /// Handle forwarding the server's data to the client.
@@ -33,14 +39,17 @@ impl Connection {
         server: impl AsyncRead + Unpin,
         client: impl AsyncWrite + Unpin,
     ) -> IOResult<()> {
-        forward_with_callback(server, client, |packet| self.parse_server_packet(packet)).await
+        forward_with_callback(server, client, |packet| {
+            self.parse_server_packet(packet, &ExtensionManager::default())
+        })
+        .await
     }
 
     /// Handle a packet from the client.
     ///
     /// Returns `None` if a complete packet was read. Otherwise returns the number of additional
     /// bytes that are needed.
-    fn parse_client_packet(&self, packet: &[u8]) -> Option<usize> {
+    fn parse_client_packet(&self, packet: &[u8], ext_mgr: &impl ExtInfoProvider) -> Option<usize> {
         if self.read_client_setup.load(Ordering::Relaxed) {
             let length_field = match packet.get(2..4) {
                 None => return Some(4 - packet.len()),
@@ -51,7 +60,14 @@ impl Connection {
             } else {
                 // Big requests
                 let length_field = match packet.get(4..8) {
-                    None => return Some(packet.len() - 8),
+                    None => {
+                        if packet.len() < 8 {
+                            eprintln!("Got big packet but with a length less than 8");
+                            return None;
+                        } else {
+                            return Some(packet.len() - 8);
+                        }
+                    }
                     Some(length_field) => u32::from_ne_bytes(length_field.try_into().unwrap()),
                 };
                 usize::try_from(length_field).unwrap() * 4
@@ -60,6 +76,16 @@ impl Connection {
                 // Need more data
                 Some(length_field - packet.len())
             } else {
+                if let Ok(evt) = Event::parse(&packet, ext_mgr) {
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .append(true)
+                        .open("/home/gramar/evt.txt")
+                    {
+                        let _ = file.write(format!("Outgoing: {:?}", evt).as_bytes());
+                    }
+                }
                 self.connection_inner.borrow_mut().client_request(packet);
                 None
             }
@@ -92,7 +118,7 @@ impl Connection {
     ///
     /// Returns `None` if a complete packet was read. Otherwise returns the number of additional
     /// bytes that are needed.
-    fn parse_server_packet(&self, packet: &[u8]) -> Option<usize> {
+    fn parse_server_packet(&self, packet: &[u8], ext: &impl ExtInfoProvider) -> Option<usize> {
         if self.read_server_setup.load(Ordering::Relaxed) {
             const ERROR: u8 = 0;
             const REPLY: u8 = 1;
@@ -121,6 +147,16 @@ impl Connection {
                 // Need more data
                 Some(packet_length - packet.len())
             } else {
+                if let Ok(evt) = Event::parse(&packet, ext) {
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .append(true)
+                        .open("/home/gramar/evt.txt")
+                    {
+                        let _ = file.write(format!("Outgoing: {:?}", evt).as_bytes());
+                    }
+                }
                 // Got a full packet
                 let mut inner = self.connection_inner.borrow_mut();
                 match packet[0] {

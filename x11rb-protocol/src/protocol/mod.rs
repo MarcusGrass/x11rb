@@ -8656,7 +8656,7 @@ impl Event {
     #[allow(clippy::cognitive_complexity, clippy::match_single_binding)]
     pub fn parse(
         event: &[u8],
-        ext_info_provider: &dyn ExtInfoProvider,
+        ext_info_provider: &impl ExtInfoProvider,
     ) -> Result<Self, ParseError> {
         let event_code = response_type(event)?;
 
@@ -8844,7 +8844,7 @@ impl Event {
     #[allow(clippy::match_single_binding)]
     fn from_generic_event(
         event: &[u8],
-        ext_info_provider: &dyn ExtInfoProvider,
+        ext_info_provider: &impl ExtInfoProvider,
     ) -> Result<Self, ParseError> {
         let ge_event = xproto::GeGenericEvent::try_parse(event)?.0;
         let ext_name = ext_info_provider

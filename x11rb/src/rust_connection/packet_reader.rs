@@ -6,6 +6,8 @@ use std::{cmp, fmt, io};
 use super::Stream;
 use crate::utils::RawFdContainer;
 use x11rb_protocol::packet_reader::PacketReader as ProtoPacketReader;
+use x11rb_protocol::protocol::Event;
+use crate::extension_manager::ExtensionManager;
 
 /// A wrapper around a reader that reads X11 packet.
 pub(crate) struct PacketReader {
