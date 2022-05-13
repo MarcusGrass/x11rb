@@ -7,6 +7,7 @@ use x11rb::x11_utils::{
 
 use std::collections::VecDeque;
 use std::convert::TryInto;
+use std::io::Write;
 
 /// Parse some data and print the resulting object.
 ///
@@ -61,6 +62,7 @@ impl ConnectionInner {
         }
         print_parse::<xproto::SetupRequest>(packet);
         assert_eq!(self.next_client_request, 0);
+        record(MessageKind::ClientSetup, &packet);
         self.next_client_request = 1;
     }
 
@@ -71,6 +73,7 @@ impl ConnectionInner {
             0 => print_parse::<xproto::SetupFailed>(packet),
             1 => {
                 if let Ok(setup) = print_parse_return::<xproto::Setup>(packet) {
+                    record(MessageKind::ServerSetup, &packet);
                     let expected = (11, 0);
                     let actual = (setup.protocol_major_version, setup.protocol_minor_version);
                     if expected != actual {
@@ -81,13 +84,17 @@ impl ConnectionInner {
                     }
                 }
             }
-            2 => print_parse::<xproto::SetupAuthenticate>(packet),
+            2 => {
+                record(MessageKind::ServerMessage, &packet);
+                print_parse::<xproto::SetupAuthenticate>(packet)
+            }
             _ => eprintln!("Unknown server setup response: {:?}", packet),
         }
     }
 
     /// Handle a request sent by the client
     pub fn client_request(&mut self, packet: &[u8]) {
+        record(MessageKind::ClientMessage, &packet);
         fn do_parse(inner: &mut ConnectionInner, packet: &[u8]) -> Result<(), ParseError> {
             let seqno = inner.next_client_request;
             inner.next_client_request = seqno.wrapping_add(1);
@@ -130,10 +137,10 @@ impl ConnectionInner {
 
     /// Handle an X11 error sent by the server
     pub fn server_error(&mut self, packet: &[u8]) {
+        record(MessageKind::ServerMessage, &packet);
         fn do_parse(inner: &mut ConnectionInner, packet: &[u8]) -> Result<(), ParseError> {
             let err = X11Error::try_parse(packet, &inner.ext_info)?;
             println!("server ({}): {:?}", err.sequence, err);
-
             // Remove a pending request if it failed
             let next_pending = inner.pending_replies.front().map(|r| r.seqno);
             if next_pending == Some(err.sequence) {
@@ -149,6 +156,7 @@ impl ConnectionInner {
 
     /// Handle an X11 event sent by the server
     pub fn server_event(&mut self, packet: &[u8]) {
+        record(MessageKind::ServerMessage, &packet);
         fn do_parse(inner: &mut ConnectionInner, packet: &[u8]) -> Result<(), ParseError> {
             let event = Event::parse(packet, &inner.ext_info)?;
             println!(
@@ -158,6 +166,7 @@ impl ConnectionInner {
             );
             Ok(())
         }
+
         if let Err(e) = do_parse(self, packet) {
             eprintln!("Error while parsing an X11 event: {:?}", e);
         }
@@ -165,6 +174,7 @@ impl ConnectionInner {
 
     /// Handle a reply sent by the server
     pub fn server_reply(&mut self, packet: &[u8]) {
+        record(MessageKind::ServerMessage, &packet);
         fn do_parse(inner: &mut ConnectionInner, packet: &[u8]) -> Result<(), ParseError> {
             // Figure out information about the request that is being answered.
             let request = match inner.pending_replies.pop_front() {
@@ -215,6 +225,39 @@ impl ConnectionInner {
             eprintln!("Error while parsing an X11 event: {:?}", e);
         }
     }
+}
+
+enum MessageKind {
+    ClientSetup,
+    ServerSetup,
+    ClientMessage,
+    ServerMessage,
+}
+
+impl MessageKind {
+    fn transform_delimited(&self, payload: &[u8]) -> Vec<u8> {
+        let mut v = vec![];
+        match self {
+            MessageKind::ClientSetup => {
+                v.extend_from_slice(b"___CLIENT_SETUP___");
+            }
+            MessageKind::ServerSetup => v.extend_from_slice(b"___SERVER_SETUP___"),
+            MessageKind::ClientMessage => v.extend_from_slice(b"___CLIENT_OUTGOING___"),
+            MessageKind::ServerMessage => v.extend_from_slice(b"___SERVER_OUTGOING___"),
+        }
+        v.extend_from_slice(payload);
+        v
+    }
+}
+
+fn record(message_kind: MessageKind, payload: &[u8]) {
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open("/home/gramar/code/rust/pgwm/event-source/long.log")
+        .unwrap();
+    let _ = f.write(&message_kind.transform_delimited(payload)).unwrap();
 }
 
 /// Representation of a request that was not yet answered.
