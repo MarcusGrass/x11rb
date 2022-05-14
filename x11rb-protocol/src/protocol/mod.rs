@@ -9323,14 +9323,14 @@ impl Event {
 }
 
 /// Get the response type out of the raw bytes of an X11 error or event.
-fn response_type(raw_bytes: &[u8]) -> Result<u8, ParseError> {
+pub fn response_type(raw_bytes: &[u8]) -> Result<u8, ParseError> {
     raw_bytes.get(0)
         .map(|x| x & 0x7f)
         .ok_or(ParseError::InsufficientData)
 }
 
 /// Get the sequence number out of an X11 packet.
-fn sequence_number(raw_bytes: &[u8]) -> Result<u16, ParseError> {
+pub fn sequence_number(raw_bytes: &[u8]) -> Result<u16, ParseError> {
     raw_bytes.get(2..4)
         .map(|b| u16::from_ne_bytes(b.try_into().unwrap()))
         .ok_or(ParseError::InsufficientData)

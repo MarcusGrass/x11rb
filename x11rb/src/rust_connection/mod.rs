@@ -64,7 +64,7 @@ pub struct SingleThreadedRustConnection<S: Stream = DefaultStream> {
     // lock based only on a atomic variable would be more efficient.
     packet_reader: RefCell<PacketReader>,
     setup: Setup,
-    extension_manager: RefCell<ExtensionManager>,
+    pub extension_manager: RefCell<ExtensionManager>,
     maximum_request_bytes: RefCell<MaxRequestBytes>,
     id_allocator: RefCell<IdAllocator>,
 }
