@@ -36,6 +36,9 @@ winapi-wsapoll = "0.1.1"
 version = "0.3"
 features = ["winsock2"]
 
+[dev-dependencies]
+criterion = "0.3.5"
+
 [features]
 # Without this feature, all uses of `unsafe` in the crate are forbidden via
 # #![deny(unsafe_code)]. This has the effect of disabling the XCB FFI bindings.
@@ -146,3 +149,7 @@ required-features = ["image"]
 [[example]]
 name = "record"
 required-features = ["record"]
+
+[[bench]]
+name = "benchmark"
+harness = false
