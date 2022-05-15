@@ -3,7 +3,7 @@
 use std::convert::TryInto;
 use std::io::IoSlice;
 use std::mem::drop;
-use std::cell::{RefCell, RefMut};
+use std::cell::{RefCell, UnsafeCell};
 use std::sync::{Condvar, Mutex, MutexGuard, TryLockError};
 
 use crate::connection::{
@@ -48,12 +48,600 @@ struct ConnectionInner {
 
 type MutexGuardInner<'a> = MutexGuard<'a, ConnectionInner>;
 
-type RefMutInner<'a> = RefMut<'a, ConnectionInner>;
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum BlockingMode {
     Blocking,
     NonBlocking,
+}
+#[derive(Debug)]
+pub struct UnsafeRustConnection<S: Stream = DefaultStream> {
+    inner: UnsafeCell<ConnectionInner>,
+    stream: S,
+    // This mutex is only locked with `try_lock` (never blocks), so a simpler
+    // lock based only on a atomic variable would be more efficient.
+    packet_reader: UnsafeCell<PacketReader>,
+    setup: Setup,
+    pub extension_manager: UnsafeCell<ExtensionManager>,
+    maximum_request_bytes: UnsafeCell<MaxRequestBytes>,
+    id_allocator: UnsafeCell<IdAllocator>,
+}
+
+impl UnsafeRustConnection<DefaultStream> {
+    /// Establish a new connection.
+    ///
+    /// If no `dpy_name` is provided, the value from `$DISPLAY` is used.
+    pub fn connect(dpy_name: Option<&str>) -> Result<(Self, usize), ConnectError> {
+        // Parse display information
+        let parsed_display = x11rb_protocol::parse_display::parse_display(dpy_name)
+            .ok_or(ConnectError::DisplayParsingError)?;
+        let screen = parsed_display.screen.into();
+
+        // Establish connection by iterating over ConnectAddresses until we find one that
+        // works.
+        let mut error = None;
+        for addr in parsed_display.connect_instruction() {
+            match DefaultStream::connect(addr) {
+                Ok(stream) => {
+                    // we found a stream, get auth information
+                    let (family, address) = stream.peer_addr()?;
+                    let (auth_name, auth_data) = get_auth(family, &address, parsed_display.display)
+                        // Ignore all errors while determining auth; instead we just try without auth info.
+                        .unwrap_or(None)
+                        .unwrap_or_else(|| (Vec::new(), Vec::new()));
+
+                    // finish connecting to server
+                    return Ok((
+                        Self::connect_to_stream_with_auth_info(
+                            stream, screen, auth_name, auth_data,
+                        )?,
+                        screen,
+                    ));
+                }
+                Err(e) => {
+                    error = Some(e);
+                    continue;
+                }
+            }
+        }
+
+        // none of the addresses worked
+        Err(match error {
+            Some(e) => ConnectError::IoError(e),
+            None => ConnectError::DisplayParsingError,
+        })
+    }
+}
+impl<S: Stream> UnsafeRustConnection<S> {
+    /// Establish a new connection to the given streams.
+    ///
+    /// `read` is used for reading data from the X11 server and `write` is used for writing.
+    /// `screen` is the number of the screen that should be used. This function checks that a
+    /// screen with that number exists.
+    pub fn connect_to_stream(stream: S, screen: usize) -> Result<Self, ConnectError> {
+        Self::connect_to_stream_with_auth_info(stream, screen, Vec::new(), Vec::new())
+    }
+
+    /// Establish a new connection to the given streams.
+    ///
+    /// `read` is used for reading data from the X11 server and `write` is used for writing.
+    /// `screen` is the number of the screen that should be used. This function checks that a
+    /// screen with that number exists.
+    ///
+    /// The parameters `auth_name` and `auth_data` are used for the members
+    /// `authorization_protocol_name` and `authorization_protocol_data` of the `SetupRequest` that
+    /// is sent to the X11 server.
+    pub fn connect_to_stream_with_auth_info(
+        stream: S,
+        screen: usize,
+        auth_name: Vec<u8>,
+        auth_data: Vec<u8>,
+    ) -> Result<Self, ConnectError> {
+        let (mut connect, setup_request) = Connect::with_authorization(auth_name, auth_data);
+
+        // write the connect() setup request
+        let mut nwritten = 0;
+        let mut fds = vec![];
+
+        while nwritten != setup_request.len() {
+            stream.poll(PollMode::Writable)?;
+            // poll returned successfully, so the stream is writable.
+            match stream.write(&setup_request[nwritten..], &mut fds) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    )
+                        .into())
+                }
+                Ok(n) => nwritten += n,
+                // Spurious wakeup from poll, try again
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        // read in the setup
+        loop {
+            stream.poll(PollMode::Readable)?;
+            let adv = match stream.read(connect.buffer(), &mut fds) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "failed to read whole buffer",
+                    )
+                        .into())
+                }
+                Ok(n) => n,
+                // Spurious wakeup from poll, try again
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e.into()),
+            };
+
+            // advance the internal buffer
+            if connect.advance(adv) {
+                break;
+            }
+        }
+
+        // resolve the setup
+        let setup = connect.into_setup()?;
+
+        // Check that we got a valid screen number
+        if screen >= setup.roots.len() {
+            return Err(ConnectError::InvalidScreen);
+        }
+
+        // Success! Set up our state
+        Self::for_connected_stream(stream, setup)
+    }
+
+    /// Establish a new connection for an already connected stream.
+    ///
+    /// The given `stream` is used for communicating with the X11 server.
+    /// It is assumed that `setup` was just received from the server. Thus, the first reply to a
+    /// request that is sent will have sequence number one.
+    pub fn for_connected_stream(stream: S, setup: Setup) -> Result<Self, ConnectError> {
+        Self::for_inner(stream, ProtoConnection::new(), setup)
+    }
+
+    fn for_inner(stream: S, inner: ProtoConnection, setup: Setup) -> Result<Self, ConnectError> {
+        let id_allocator = IdAllocator::new(setup.resource_id_base, setup.resource_id_mask)?;
+
+        Ok(UnsafeRustConnection {
+            inner: UnsafeCell::new(ConnectionInner {
+                inner,
+                write_buffer: WriteBuffer::new(),
+            }),
+            stream,
+            packet_reader: UnsafeCell::new(PacketReader::new()),
+            setup,
+            extension_manager: Default::default(),
+            maximum_request_bytes: UnsafeCell::new(MaxRequestBytes::Unknown),
+            id_allocator: UnsafeCell::new(id_allocator),
+        })
+    }
+
+    /// Internal function for actually sending a request.
+    ///
+    /// This function "does the actual work" for `send_request_with_reply()` and
+    /// `send_request_without_reply()`.
+    fn send_request(
+        &self,
+        bufs: &[IoSlice<'_>],
+        fds: Vec<RawFdContainer>,
+        kind: ReplyFdKind,
+    ) -> Result<SequenceNumber, ConnectionError> {
+        let mut storage = Default::default();
+        let bufs = compute_length_field(self, bufs, &mut storage)?;
+
+        // Note: `inner` must be kept blocked until the request has been completely written
+        // or buffered to avoid sending the data of different requests interleaved. For this
+        // reason, `read_packet_and_enqueue` must always be called with `BlockingMode::NonBlocking`
+        // during a write, otherise `inner` would be temporarily released.
+        let mut inner = unsafe { &mut *self.inner.get() };
+
+        loop {
+            match inner.inner.send_request(kind) {
+                Some(seqno) => {
+                    // Now actually send the buffers
+                    self.write_all_vectored(&mut inner, bufs, fds)?;
+                    return Ok(seqno);
+                }
+                None => {
+                    self.send_sync(&mut inner)?;
+                }
+            }
+        }
+    }
+
+    /// Send a synchronisation packet to the X11 server.
+    ///
+    /// This function sends a `GetInputFocus` request to the X11 server and arranges for its reply
+    /// to be ignored. This ensures that a reply is expected (`ConnectionInner.next_reply_expected`
+    /// increases).
+    fn send_sync<'a>(
+        &'a self,
+        inner: &'a mut ConnectionInner,
+    ) -> Result<(), std::io::Error> {
+        let length = 1u16.to_ne_bytes();
+        let request = [
+            GET_INPUT_FOCUS_REQUEST,
+            0, /* pad */
+            length[0],
+            length[1],
+        ];
+
+        let seqno = inner
+            .inner
+            .send_request(ReplyFdKind::ReplyWithoutFDs)
+            .expect("Sending a HasResponse request should not be blocked by syncs");
+        inner
+            .inner
+            .discard_reply(seqno, DiscardMode::DiscardReplyAndError);
+        self.write_all_vectored(inner, &[IoSlice::new(&request)], Vec::new())?;
+
+        Ok(())
+    }
+
+    /// Write a set of buffers on a `writer`. May also read packets
+    /// from the server.
+    fn write_all_vectored<'a>(
+        &'a self,
+        inner: &mut ConnectionInner,
+        mut bufs: &[IoSlice<'_>],
+        mut fds: Vec<RawFdContainer>,
+    ) -> std::io::Result<()> {
+        let mut partial_buf: &[u8] = &[];
+        while !partial_buf.is_empty() || !bufs.is_empty() || !fds.is_empty() {
+            self.stream.poll(PollMode::ReadAndWritable)?;
+            let write_result = if !partial_buf.is_empty() {
+                // "inner" is held, passed into this function, so this should never be held
+                inner
+                    .write_buffer
+                    .write(&self.stream, partial_buf, &mut fds)
+            } else {
+                // same as above
+                inner
+                    .write_buffer
+                    .write_vectored(&self.stream, bufs, &mut fds)
+            };
+            match write_result {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write anything",
+                    ));
+                }
+                Ok(mut count) => {
+                    // Successful write
+                    if count >= partial_buf.len() {
+                        count -= partial_buf.len();
+                        partial_buf = &[];
+                    } else {
+                        partial_buf = &partial_buf[count..];
+                        count = 0;
+                    }
+                    while count > 0 {
+                        if count >= bufs[0].len() {
+                            count -= bufs[0].len();
+                        } else {
+                            partial_buf = &bufs[0][count..];
+                            count = 0;
+                        }
+                        bufs = &bufs[1..];
+                        // Skip empty slices
+                        while bufs.first().map(|s| s.len()) == Some(0) {
+                            bufs = &bufs[1..];
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Writing would block, try to read instead because the
+                    // server might not accept new requests after its
+                    // buffered replies have been read.
+                    self.read_packet_and_enqueue(inner, BlockingMode::NonBlocking)?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_impl<'a>(
+        &'a self,
+        inner: &'a mut ConnectionInner,
+    ) -> std::io::Result<()> {
+        // n.b. notgull: inner guard is held
+        while inner.write_buffer.needs_flush() {
+            self.stream.poll(PollMode::ReadAndWritable)?;
+            match inner.write_buffer.flush(&self.stream) {
+                // Flush completed
+                Ok(()) => break,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Writing would block, try to read instead because the
+                    // server might not accept new requests after its
+                    // buffered replies have been read.
+                    self.read_packet_and_enqueue(inner, BlockingMode::NonBlocking)?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Read a packet from the connection.
+    ///
+    /// This function waits for an X11 packet to be received. It drops the mutex protecting the
+    /// inner data while waiting for a packet so that other threads can make progress. For this
+    /// reason, you need to pass in a `MutexGuard` to be dropped. This function locks the mutex
+    /// again and returns a new `MutexGuard`.
+    ///
+    /// Note: If `mode` is `BlockingMode::Blocking`, the lock on `inner` will be temporarily
+    /// released. While sending a request, `inner` must be kept locked to avoid sending the data
+    /// of different requests interleaved. So, when `read_packet_and_enqueue` is called as part
+    /// of a write, it must always be done with `mode` set to `BlockingMode::NonBlocking`.
+    fn read_packet_and_enqueue<'a>(
+        &'a self,
+        inner: &'a mut ConnectionInner,
+        mode: BlockingMode,
+    ) -> Result<(), std::io::Error> {
+        if mode == BlockingMode::Blocking {
+            self.stream.poll(PollMode::Readable)?;
+        }
+        let mut fds = Vec::new();
+        let mut packets = Vec::new();
+        let packet_reader = unsafe { &mut *self.packet_reader.get() };
+        packet_reader.try_read_packets(&self.stream, &mut packets, &mut fds)?;
+        inner.inner.enqueue_fds(fds);
+        packets
+            .into_iter()
+            .for_each(|packet| inner.inner.enqueue_packet(packet));
+        Ok(())
+    }
+
+    fn prefetch_maximum_request_bytes_impl(&self, max_bytes: &mut MaxRequestBytes) {
+        if let MaxRequestBytes::Unknown = *max_bytes {
+            let request = self
+                .bigreq_enable()
+                .map(|cookie| cookie.into_sequence_number())
+                .ok();
+            *max_bytes = MaxRequestBytes::Requested(request);
+        }
+    }
+
+    /// Returns a reference to the contained stream.
+    pub fn stream(&self) -> &S {
+        &self.stream
+    }
+}
+impl<S: Stream> RequestConnection for UnsafeRustConnection<S> {
+    type Buf = Vec<u8>;
+
+    fn send_request_with_reply<Reply>(
+        &self,
+        bufs: &[IoSlice<'_>],
+        fds: Vec<RawFdContainer>,
+    ) -> Result<Cookie<'_, Self, Reply>, ConnectionError>
+        where
+            Reply: TryParse,
+    {
+        Ok(Cookie::new(
+            self,
+            self.send_request(bufs, fds, ReplyFdKind::ReplyWithoutFDs)?,
+        ))
+    }
+
+    fn send_request_with_reply_with_fds<Reply>(
+        &self,
+        bufs: &[IoSlice<'_>],
+        fds: Vec<RawFdContainer>,
+    ) -> Result<CookieWithFds<'_, Self, Reply>, ConnectionError>
+        where
+            Reply: TryParseFd,
+    {
+        Ok(CookieWithFds::new(
+            self,
+            self.send_request(bufs, fds, ReplyFdKind::ReplyWithFDs)?,
+        ))
+    }
+
+    fn send_request_without_reply(
+        &self,
+        bufs: &[IoSlice<'_>],
+        fds: Vec<RawFdContainer>,
+    ) -> Result<VoidCookie<'_, Self>, ConnectionError> {
+        Ok(VoidCookie::new(
+            self,
+            self.send_request(bufs, fds, ReplyFdKind::NoReply)?,
+        ))
+    }
+
+    fn discard_reply(&self, sequence: SequenceNumber, _kind: RequestKind, mode: DiscardMode) {
+        unsafe { &mut *self.inner.get() }
+            .inner
+            .discard_reply(sequence, mode);
+    }
+
+    fn prefetch_extension_information(
+        &self,
+        extension_name: &'static str,
+    ) -> Result<(), ConnectionError> {
+        unsafe { &mut *self.extension_manager.get() }
+            .prefetch_extension_information(self, extension_name)
+    }
+
+    fn extension_information(
+        &self,
+        extension_name: &'static str,
+    ) -> Result<Option<ExtensionInformation>, ConnectionError> {
+        unsafe { &mut *self.extension_manager.get() }
+            .extension_information(self, extension_name)
+    }
+
+    fn wait_for_reply_or_raw_error(
+        &self,
+        sequence: SequenceNumber,
+    ) -> Result<ReplyOrError<Vec<u8>>, ConnectionError> {
+        match self.wait_for_reply_with_fds_raw(sequence)? {
+            ReplyOrError::Reply((reply, _fds)) => Ok(ReplyOrError::Reply(reply)),
+            ReplyOrError::Error(e) => Ok(ReplyOrError::Error(e)),
+        }
+    }
+
+    fn wait_for_reply(&self, sequence: SequenceNumber) -> Result<Option<Vec<u8>>, ConnectionError> {
+        let mut inner = unsafe { &mut *self.inner.get() };
+        self.flush_impl(&mut inner)?;
+        loop {
+            match inner.inner.poll_for_reply(sequence) {
+                PollReply::TryAgain => {}
+                PollReply::NoReply => return Ok(None),
+                PollReply::Reply(buffer) => return Ok(Some(buffer)),
+            }
+            self.read_packet_and_enqueue(&mut inner, BlockingMode::Blocking)?;
+        }
+    }
+
+    fn check_for_raw_error(
+        &self,
+        sequence: SequenceNumber,
+    ) -> Result<Option<Buffer>, ConnectionError> {
+        let mut inner = unsafe { &mut *self.inner.get() };
+        if inner.inner.prepare_check_for_reply_or_error(sequence) {
+            self.send_sync(&mut inner)?;
+            assert!(!inner.inner.prepare_check_for_reply_or_error(sequence));
+        }
+        // Ensure the request is sent
+        self.flush_impl(&mut inner)?;
+        loop {
+            match inner.inner.poll_check_for_reply_or_error(sequence) {
+                PollReply::TryAgain => {}
+                PollReply::NoReply => return Ok(None),
+                PollReply::Reply(buffer) => return Ok(Some(buffer)),
+            }
+            self.read_packet_and_enqueue(&mut inner, BlockingMode::Blocking)?;
+        }
+    }
+
+    fn wait_for_reply_with_fds_raw(
+        &self,
+        sequence: SequenceNumber,
+    ) -> Result<ReplyOrError<BufWithFds, Buffer>, ConnectionError> {
+        let mut inner = unsafe { &mut *self.inner.get() };
+        // Ensure the request is sent
+        self.flush_impl(&mut inner)?;
+        loop {
+            if let Some(reply) = inner.inner.poll_for_reply_or_error(sequence) {
+                if reply.0[0] == 0 {
+                    return Ok(ReplyOrError::Error(reply.0));
+                } else {
+                    return Ok(ReplyOrError::Reply(reply));
+                }
+            }
+            self.read_packet_and_enqueue(&mut inner, BlockingMode::Blocking)?;
+        }
+    }
+
+    fn maximum_request_bytes(&self) -> usize {
+        let mut max_bytes = unsafe { &mut *self.maximum_request_bytes.get() };
+        self.prefetch_maximum_request_bytes_impl(&mut max_bytes);
+        use MaxRequestBytes::*;
+        match *max_bytes {
+            Unknown => unreachable!("We just prefetched this"),
+            Requested(seqno) => {
+                let length = seqno
+                    // If prefetching the request succeeded, get a cookie
+                    .and_then(|seqno| {
+                        Cookie::<_, EnableReply>::new(self, seqno)
+                            // and then get the reply to the request
+                            .reply()
+                            .map(|reply| reply.maximum_request_length)
+                            .ok()
+                    })
+                    // If anything failed (sending the request, getting the reply), use Setup
+                    .unwrap_or_else(|| self.setup.maximum_request_length.into())
+                    // Turn the u32 into usize, using the max value in case of overflow
+                    .try_into()
+                    .unwrap_or(usize::max_value());
+                let length = length * 4;
+                *max_bytes = Known(length);
+                length
+            }
+            Known(length) => length,
+        }
+    }
+
+    fn prefetch_maximum_request_bytes(&self) {
+        let mut max_bytes = unsafe { &mut *self.maximum_request_bytes.get() };
+        self.prefetch_maximum_request_bytes_impl(&mut max_bytes);
+    }
+
+    fn parse_error(&self, error: &[u8]) -> Result<crate::x11_utils::X11Error, ParseError> {
+        let ext_mgr = unsafe { &mut *self.extension_manager.get() };
+        crate::x11_utils::X11Error::try_parse(error, &*ext_mgr)
+    }
+
+    fn parse_event(&self, event: &[u8]) -> Result<crate::protocol::Event, ParseError> {
+        let ext_mgr = unsafe { &mut *self.extension_manager.get() };
+        crate::protocol::Event::parse(event, &*ext_mgr)
+    }
+}
+
+impl<S: Stream> Connection for UnsafeRustConnection<S> {
+    fn wait_for_raw_event_with_sequence(
+        &self,
+    ) -> Result<RawEventAndSeqNumber<Vec<u8>>, ConnectionError> {
+        let mut inner = unsafe { &mut *self.inner.get() };
+        loop {
+            if let Some(event) = inner.inner.poll_for_event_with_sequence() {
+                return Ok(event);
+            }
+            self.read_packet_and_enqueue(&mut inner, BlockingMode::Blocking)?;
+        }
+    }
+
+    fn poll_for_raw_event_with_sequence(
+        &self,
+    ) -> Result<Option<RawEventAndSeqNumber<Vec<u8>>>, ConnectionError> {
+        let mut inner = unsafe { &mut *self.inner.get() };
+        if let Some(event) = inner.inner.poll_for_event_with_sequence() {
+            Ok(Some(event))
+        } else {
+            self.read_packet_and_enqueue(&mut inner, BlockingMode::NonBlocking)?;
+            Ok(inner.inner.poll_for_event_with_sequence())
+        }
+    }
+
+    fn flush(&self) -> Result<(), ConnectionError> {
+        let mut inner = unsafe { &mut *self.inner.get() };
+        self.flush_impl(&mut inner)?;
+        Ok(())
+    }
+
+    fn setup(&self) -> &Setup {
+        &self.setup
+    }
+
+    fn generate_id(&self) -> Result<u32, ReplyOrIdError> {
+        let id_allocator = unsafe { &mut *self.id_allocator.get() };
+        if let Some(id) = id_allocator.generate_id() {
+            Ok(id)
+        } else {
+            use crate::protocol::xc_misc::{self, ConnectionExt as _};
+
+            if self
+                .extension_information(xc_misc::X11_EXTENSION_NAME)?
+                .is_none()
+            {
+                // IDs are exhausted and XC-MISC is not available
+                Err(ReplyOrIdError::IdsExhausted)
+            } else {
+                id_allocator.update_xid_range(&self.xc_misc_get_xid_range()?.reply()?)?;
+                id_allocator
+                    .generate_id()
+                    .ok_or(ReplyOrIdError::IdsExhausted)
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -264,7 +852,7 @@ impl<S: Stream> SingleThreadedRustConnection<S> {
     /// increases).
     fn send_sync<'a>(
         &'a self,
-        mut inner: &'a mut ConnectionInner,
+        inner: &'a mut ConnectionInner,
     ) -> Result<(), std::io::Error> {
         let length = 1u16.to_ne_bytes();
         let request = [
@@ -290,7 +878,7 @@ impl<S: Stream> SingleThreadedRustConnection<S> {
     /// from the server.
     fn write_all_vectored<'a>(
         &'a self,
-        mut inner: &mut ConnectionInner,
+        inner: &mut ConnectionInner,
         mut bufs: &[IoSlice<'_>],
         mut fds: Vec<RawFdContainer>,
     ) -> std::io::Result<()> {
@@ -352,7 +940,7 @@ impl<S: Stream> SingleThreadedRustConnection<S> {
 
     fn flush_impl<'a>(
         &'a self,
-        mut inner: &'a mut ConnectionInner,
+        inner: &'a mut ConnectionInner,
     ) -> std::io::Result<()> {
         // n.b. notgull: inner guard is held
         while inner.write_buffer.needs_flush() {
@@ -385,7 +973,7 @@ impl<S: Stream> SingleThreadedRustConnection<S> {
     /// of a write, it must always be done with `mode` set to `BlockingMode::NonBlocking`.
     fn read_packet_and_enqueue<'a>(
         &'a self,
-        mut inner: &'a mut ConnectionInner,
+        inner: &'a mut ConnectionInner,
         mode: BlockingMode,
     ) -> Result<(), std::io::Error> {
         if mode == BlockingMode::Blocking {

@@ -136,7 +136,7 @@
     // Not everything in x11rb::protocol has doc comments
     missing_docs,
 )]
-#![cfg_attr(not(feature = "allow-unsafe-code"), forbid(unsafe_code))]
+//#![cfg_attr(not(feature = "allow-unsafe-code"), forbid(unsafe_code))]
 
 // Only contains documentation, but no "actual rust"
 pub mod event_loop_integration;

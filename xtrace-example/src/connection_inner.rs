@@ -7,6 +7,7 @@ use x11rb::x11_utils::{
 
 use std::collections::VecDeque;
 use std::convert::TryInto;
+use std::fs::File;
 use std::io::Write;
 
 /// Parse some data and print the resulting object.
@@ -31,7 +32,7 @@ fn print_parse<T: TryParse + std::fmt::Debug>(data: &[u8]) {
 }
 
 /// Common state of an X11 connection
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ConnectionInner {
     /// Information about present extensions. Entries are added when a reply to a `QueryExtension`
     /// request comes in.
@@ -42,6 +43,19 @@ pub struct ConnectionInner {
 
     /// Requests which were not yet answered by the X11 server.
     pending_replies: VecDeque<PendingReply>,
+
+    out_file: File,
+}
+
+impl Default for ConnectionInner {
+    fn default() -> Self {
+        Self {
+            ext_info: Default::default(),
+            next_client_request: 0,
+            pending_replies: Default::default(),
+            out_file: open_appropriate_file()
+        }
+    }
 }
 
 impl ConnectionInner {
@@ -62,7 +76,7 @@ impl ConnectionInner {
         }
         print_parse::<xproto::SetupRequest>(packet);
         assert_eq!(self.next_client_request, 0);
-        record(MessageKind::ClientSetup, &packet);
+        self.record(MessageKind::ClientSetup, &packet);
         self.next_client_request = 1;
     }
 
@@ -73,7 +87,7 @@ impl ConnectionInner {
             0 => print_parse::<xproto::SetupFailed>(packet),
             1 => {
                 if let Ok(setup) = print_parse_return::<xproto::Setup>(packet) {
-                    record(MessageKind::ServerSetup, &packet);
+                    self.record(MessageKind::ServerSetup, &packet);
                     let expected = (11, 0);
                     let actual = (setup.protocol_major_version, setup.protocol_minor_version);
                     if expected != actual {
@@ -85,7 +99,7 @@ impl ConnectionInner {
                 }
             }
             2 => {
-                record(MessageKind::ServerMessage, &packet);
+                self.record(MessageKind::ServerMessage, &packet);
                 print_parse::<xproto::SetupAuthenticate>(packet)
             }
             _ => eprintln!("Unknown server setup response: {:?}", packet),
@@ -94,7 +108,7 @@ impl ConnectionInner {
 
     /// Handle a request sent by the client
     pub fn client_request(&mut self, packet: &[u8]) {
-        record(MessageKind::ClientMessage, &packet);
+        self.record(MessageKind::ClientMessage, &packet);
         fn do_parse(inner: &mut ConnectionInner, packet: &[u8]) -> Result<(), ParseError> {
             let seqno = inner.next_client_request;
             inner.next_client_request = seqno.wrapping_add(1);
@@ -137,7 +151,7 @@ impl ConnectionInner {
 
     /// Handle an X11 error sent by the server
     pub fn server_error(&mut self, packet: &[u8]) {
-        record(MessageKind::ServerMessage, &packet);
+        self.record(MessageKind::ServerMessage, &packet);
         fn do_parse(inner: &mut ConnectionInner, packet: &[u8]) -> Result<(), ParseError> {
             let err = X11Error::try_parse(packet, &inner.ext_info)?;
             println!("server ({}): {:?}", err.sequence, err);
@@ -156,7 +170,7 @@ impl ConnectionInner {
 
     /// Handle an X11 event sent by the server
     pub fn server_event(&mut self, packet: &[u8]) {
-        record(MessageKind::ServerMessage, &packet);
+        self.record(MessageKind::ServerMessage, &packet);
         fn do_parse(inner: &mut ConnectionInner, packet: &[u8]) -> Result<(), ParseError> {
             let event = Event::parse(packet, &inner.ext_info)?;
             println!(
@@ -174,7 +188,7 @@ impl ConnectionInner {
 
     /// Handle a reply sent by the server
     pub fn server_reply(&mut self, packet: &[u8]) {
-        record(MessageKind::ServerMessage, &packet);
+        self.record(MessageKind::ServerMessage, &packet);
         fn do_parse(inner: &mut ConnectionInner, packet: &[u8]) -> Result<(), ParseError> {
             // Figure out information about the request that is being answered.
             let request = match inner.pending_replies.pop_front() {
@@ -225,6 +239,10 @@ impl ConnectionInner {
             eprintln!("Error while parsing an X11 event: {:?}", e);
         }
     }
+
+    fn record(&mut self, message_kind: MessageKind, payload: &[u8]) {
+        let _ = self.out_file.write(&message_kind.transform_delimited(payload)).unwrap();
+    }
 }
 
 enum MessageKind {
@@ -250,15 +268,20 @@ impl MessageKind {
     }
 }
 
-fn record(message_kind: MessageKind, payload: &[u8]) {
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open("/home/gramar/code/rust/pgwm/event-source/long.log")
-        .unwrap();
-    let _ = f.write(&message_kind.transform_delimited(payload)).unwrap();
+pub fn open_appropriate_file() -> File {
+    for i in 0..999 {
+        let check = format!("/home/gramar/code/rust/pgwm/event-source/ser_events{i}.log");
+        if std::fs::metadata(&check).is_err() {
+            return std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(check)
+                .unwrap();
+        }
+    }
+    panic!("All possible outfiles already exist")
 }
+
 
 /// Representation of a request that was not yet answered.
 struct PendingReply {
