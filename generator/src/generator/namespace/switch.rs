@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::generator::namespace::{ext_params_to_call_args, field_is_visible};
 use xcbgen::defs as xcbdefs;
 
 use super::{
@@ -31,18 +32,18 @@ pub(super) fn emit_switch_type(
         assert_eq!(case_align.begin.offset() % case_align.internal_align, 0);
 
         let case_deducible_fields = gather_deducible_fields(&*case.fields.borrow());
-        let mut single_field_index =
-            if case_has_single_visible_field(generator, case, &case_deducible_fields) {
-                Some(
-                    case.fields
-                        .borrow()
-                        .iter()
-                        .position(|field| generator.field_is_visible(field, &case_deducible_fields))
-                        .unwrap(),
-                )
-            } else {
-                None
-            };
+        let mut single_field_index = if case_has_single_visible_field(case, &case_deducible_fields)
+        {
+            Some(
+                case.fields
+                    .borrow()
+                    .iter()
+                    .position(|field| field_is_visible(field, &case_deducible_fields))
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
 
         if let Some(field_index) = single_field_index {
             if let Some(ref case_name) = case.name {
@@ -118,7 +119,7 @@ pub(super) fn emit_switch_type(
 
     let mut derives = Derives::all();
     derives.default_ = false;
-    for case in switch.cases.iter() {
+    for case in &switch.cases {
         generator.filter_derives_for_fields(&mut derives, &*case.fields.borrow(), false);
     }
     let mut derives = derives.to_list();
@@ -128,10 +129,6 @@ pub(super) fn emit_switch_type(
     if !derives.is_empty() {
         outln!(out, "#[derive({})]", derives.join(", "));
     }
-    outln!(
-        out,
-        r#"#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]"#
-    );
 
     if switch.kind == xcbdefs::SwitchKind::BitCase {
         outln!(out, "pub struct {} {{", name);
@@ -371,7 +368,13 @@ fn emit_switch_try_parse(
 ) {
     let external_params = switch.external_params.borrow();
 
-    if !external_params.is_empty() {
+    if external_params.is_empty() {
+        outln!(out, "impl TryParse for {} {{", name);
+        outln!(
+            out.indent(),
+            "fn try_parse(value: &[u8]) -> Result<(Self, &[u8]), ParseError> {{",
+        );
+    } else {
         outln!(out, "impl {} {{", name);
         let p = external_params
             .iter()
@@ -387,12 +390,6 @@ fn emit_switch_try_parse(
             out.indent(),
             "fn try_parse(value: &[u8], {}) -> Result<(Self, &[u8]), ParseError> {{",
             p.join(", "),
-        );
-    } else {
-        outln!(out, "impl TryParse for {} {{", name);
-        outln!(
-            out.indent(),
-            "fn try_parse(value: &[u8]) -> Result<(Self, &[u8]), ParseError> {{",
         );
     }
 
@@ -625,7 +622,7 @@ fn emit_fixed_size_switch_serialize(
     size: u32,
     out: &mut Output,
 ) {
-    assert!(switch.kind == xcbdefs::SwitchKind::Case);
+    assert_eq!(switch.kind, xcbdefs::SwitchKind::Case);
 
     let external_params = switch.external_params.borrow();
     let ext_params_arg_defs = generator.ext_params_to_arg_defs(true, &*external_params);
@@ -678,7 +675,7 @@ fn emit_fixed_size_switch_serialize(
                                     );
                                 }
                                 outln!(out, "[[");
-                                for result_byte in result_bytes.iter() {
+                                for result_byte in &result_bytes {
                                     outln!(out, "{},", result_byte);
                                 }
                                 outln!(out, "]]");
@@ -774,7 +771,7 @@ fn emit_variable_size_switch_serialize(
     let external_params = switch.external_params.borrow();
     let ext_params_arg_defs = generator.ext_params_to_arg_defs(true, &*external_params);
     let ext_params_call_args =
-        generator.ext_params_to_call_args(true, to_rust_variable_name, &*external_params);
+        ext_params_to_call_args(true, to_rust_variable_name, &*external_params);
 
     if external_params.is_empty() {
         outln!(out, "impl Serialize for {} {{", name);
@@ -784,14 +781,20 @@ fn emit_variable_size_switch_serialize(
     out.indented(|out| {
         if external_params.is_empty() {
             outln!(out, "type Bytes = Vec<u8>;");
+            outln!(
+                out,
+                "fn serialize(&self{}) -> Self::Bytes {{",
+                ext_params_arg_defs,
+            );
         } else {
             outln!(out, "#[allow(dead_code)]");
+            outln!(
+                out,
+                "fn serialize(&self{}) -> impl AsRef<[u8]> {{",
+                ext_params_arg_defs,
+            );
         }
-        outln!(
-            out,
-            "fn serialize(&self{}) -> Vec<u8> {{",
-            ext_params_arg_defs,
-        );
+
         out.indented(|out| {
             outln!(out, "let mut result = Vec::new();");
             outln!(
@@ -863,7 +866,7 @@ fn emit_variable_size_switch_serialize(
                         }
                         CaseInfo::MultiField(field_name, _) => {
                             let rust_field_name = to_rust_variable_name(field_name);
-                            let ext_params_call_args = generator.ext_params_to_call_args(
+                            let ext_params_call_args = ext_params_to_call_args(
                                 true,
                                 to_rust_variable_name,
                                 &*case.external_params.borrow(),
@@ -985,7 +988,6 @@ pub(super) fn generate_switch(
 
 /// Returns whether `case` has a single visible field.
 fn case_has_single_visible_field(
-    generator: &NamespaceGenerator<'_, '_>,
     case: &xcbdefs::SwitchCase,
     deducible_fields: &HashMap<String, DeducibleField>,
 ) -> bool {
@@ -993,7 +995,7 @@ fn case_has_single_visible_field(
         .fields
         .borrow()
         .iter()
-        .filter(|case_field| generator.field_is_visible(case_field, deducible_fields))
+        .filter(|case_field| field_is_visible(case_field, deducible_fields))
         .count();
     assert!(num_visible_fields > 0);
     num_visible_fields == 1

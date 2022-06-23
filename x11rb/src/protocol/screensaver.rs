@@ -6,147 +6,872 @@
 #![allow(clippy::too_many_arguments)]
 
 #[allow(unused_imports)]
+use super::xproto;
+use crate::errors::ParseError;
+#[allow(unused_imports)]
+use crate::utils::{pretty_print_bitmask, pretty_print_enum};
+#[allow(unused_imports)]
+use crate::x11_utils::TryIntoUSize;
+#[allow(unused_imports)]
+use crate::x11_utils::{RequestHeader, Serialize, TryParse, TryParseFd};
+#[allow(unused_imports)]
+use core::convert::TryFrom;
+#[allow(unused_imports)]
 use std::borrow::Cow;
 #[allow(unused_imports)]
 use std::convert::TryInto;
-#[allow(unused_imports)]
-use crate::utils::RawFdContainer;
-#[allow(unused_imports)]
-use crate::x11_utils::{Request, RequestHeader, Serialize, TryParse, TryParseFd};
-use std::io::IoSlice;
-use crate::connection::RequestConnection;
-#[allow(unused_imports)]
-use crate::connection::Connection as X11Connection;
-#[allow(unused_imports)]
-use crate::cookie::{Cookie, CookieWithFds, VoidCookie};
-use crate::errors::ConnectionError;
-#[allow(unused_imports)]
-use crate::errors::ReplyOrIdError;
-#[allow(unused_imports)]
-use super::xproto;
 
-pub use x11rb_protocol::protocol::screensaver::*;
+/// The X11 name of the extension for QueryExtension
+pub const X11_EXTENSION_NAME: &str = "MIT-SCREEN-SAVER";
 
-/// Get the major opcode of this extension
-fn major_opcode<Conn: RequestConnection + ?Sized>(conn: &Conn) -> Result<u8, ConnectionError> {
-    let info = conn.extension_information(X11_EXTENSION_NAME)?;
-    let info = info.ok_or(ConnectionError::UnsupportedExtension)?;
-    Ok(info.major_opcode)
+/// The version number of this extension that this client library supports.
+///
+/// This constant contains the version number of this extension that is supported
+/// by this build of x11rb. For most things, it does not make sense to use this
+/// information. If you need to send a `QueryVersion`, it is recommended to instead
+/// send the maximum version of the extension that you need.
+pub const X11_XML_VERSION: (u32, u32) = (1, 1);
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Kind(u8);
+impl Kind {
+    pub const BLANKED: Self = Self(0);
+    pub const INTERNAL: Self = Self(1);
+    pub const EXTERNAL: Self = Self(2);
 }
-
-pub fn query_version<Conn>(conn: &Conn, client_major_version: u8, client_minor_version: u8) -> Result<Cookie<'_, Conn, QueryVersionReply>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = QueryVersionRequest {
-        client_major_version,
-        client_minor_version,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_with_reply(&slices, fds)
-}
-
-pub fn query_info<Conn>(conn: &Conn, drawable: xproto::Drawable) -> Result<Cookie<'_, Conn, QueryInfoReply>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = QueryInfoRequest {
-        drawable,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_with_reply(&slices, fds)
-}
-
-pub fn select_input<Conn, A>(conn: &Conn, drawable: xproto::Drawable, event_mask: A) -> Result<VoidCookie<'_, Conn>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-    A: Into<u32>,
-{
-    let event_mask: u32 = event_mask.into();
-    let request0 = SelectInputRequest {
-        drawable,
-        event_mask,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_without_reply(&slices, fds)
-}
-
-pub fn set_attributes<'c, 'input, Conn>(conn: &'c Conn, drawable: xproto::Drawable, x: i16, y: i16, width: u16, height: u16, border_width: u16, class: xproto::WindowClass, depth: u8, visual: xproto::Visualid, value_list: &'input SetAttributesAux) -> Result<VoidCookie<'c, Conn>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = SetAttributesRequest {
-        drawable,
-        x,
-        y,
-        width,
-        height,
-        border_width,
-        class,
-        depth,
-        visual,
-        value_list: Cow::Borrowed(value_list),
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_without_reply(&slices, fds)
-}
-
-pub fn unset_attributes<Conn>(conn: &Conn, drawable: xproto::Drawable) -> Result<VoidCookie<'_, Conn>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = UnsetAttributesRequest {
-        drawable,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_without_reply(&slices, fds)
-}
-
-pub fn suspend<Conn>(conn: &Conn, suspend: u32) -> Result<VoidCookie<'_, Conn>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = SuspendRequest {
-        suspend,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_without_reply(&slices, fds)
-}
-
-/// Extension trait defining the requests of this extension.
-pub trait ConnectionExt: RequestConnection {
-    fn screensaver_query_version(&self, client_major_version: u8, client_minor_version: u8) -> Result<Cookie<'_, Self, QueryVersionReply>, ConnectionError>
-    {
-        query_version(self, client_major_version, client_minor_version)
+impl From<Kind> for u8 {
+    #[inline]
+    fn from(input: Kind) -> Self {
+        input.0
     }
-    fn screensaver_query_info(&self, drawable: xproto::Drawable) -> Result<Cookie<'_, Self, QueryInfoReply>, ConnectionError>
-    {
-        query_info(self, drawable)
+}
+impl From<Kind> for Option<u8> {
+    #[inline]
+    fn from(input: Kind) -> Self {
+        Some(input.0)
     }
-    fn screensaver_select_input<A>(&self, drawable: xproto::Drawable, event_mask: A) -> Result<VoidCookie<'_, Self>, ConnectionError>
+}
+impl From<Kind> for u16 {
+    #[inline]
+    fn from(input: Kind) -> Self {
+        u16::from(input.0)
+    }
+}
+impl From<Kind> for Option<u16> {
+    #[inline]
+    fn from(input: Kind) -> Self {
+        Some(u16::from(input.0))
+    }
+}
+impl From<Kind> for u32 {
+    #[inline]
+    fn from(input: Kind) -> Self {
+        u32::from(input.0)
+    }
+}
+impl From<Kind> for Option<u32> {
+    #[inline]
+    fn from(input: Kind) -> Self {
+        Some(u32::from(input.0))
+    }
+}
+impl From<u8> for Kind {
+    #[inline]
+    fn from(value: u8) -> Self {
+        Self(value)
+    }
+}
+impl core::fmt::Debug for Kind {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let variants = [
+            (Self::BLANKED.0.into(), "BLANKED", "Blanked"),
+            (Self::INTERNAL.0.into(), "INTERNAL", "Internal"),
+            (Self::EXTERNAL.0.into(), "EXTERNAL", "External"),
+        ];
+        pretty_print_enum(fmt, self.0.into(), &variants)
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Event(u8);
+impl Event {
+    pub const NOTIFY_MASK: Self = Self(1 << 0);
+    pub const CYCLE_MASK: Self = Self(1 << 1);
+}
+impl From<Event> for u8 {
+    #[inline]
+    fn from(input: Event) -> Self {
+        input.0
+    }
+}
+impl From<Event> for Option<u8> {
+    #[inline]
+    fn from(input: Event) -> Self {
+        Some(input.0)
+    }
+}
+impl From<Event> for u16 {
+    #[inline]
+    fn from(input: Event) -> Self {
+        u16::from(input.0)
+    }
+}
+impl From<Event> for Option<u16> {
+    #[inline]
+    fn from(input: Event) -> Self {
+        Some(u16::from(input.0))
+    }
+}
+impl From<Event> for u32 {
+    #[inline]
+    fn from(input: Event) -> Self {
+        u32::from(input.0)
+    }
+}
+impl From<Event> for Option<u32> {
+    #[inline]
+    fn from(input: Event) -> Self {
+        Some(u32::from(input.0))
+    }
+}
+impl From<u8> for Event {
+    #[inline]
+    fn from(value: u8) -> Self {
+        Self(value)
+    }
+}
+impl core::fmt::Debug for Event {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let variants = [
+            (Self::NOTIFY_MASK.0.into(), "NOTIFY_MASK", "NotifyMask"),
+            (Self::CYCLE_MASK.0.into(), "CYCLE_MASK", "CycleMask"),
+        ];
+        pretty_print_bitmask(fmt, self.0.into(), &variants)
+    }
+}
+crate::bitmask_binop!(Event, u8);
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct State(u8);
+impl State {
+    pub const OFF: Self = Self(0);
+    pub const ON: Self = Self(1);
+    pub const CYCLE: Self = Self(2);
+    pub const DISABLED: Self = Self(3);
+}
+impl From<State> for u8 {
+    #[inline]
+    fn from(input: State) -> Self {
+        input.0
+    }
+}
+impl From<State> for Option<u8> {
+    #[inline]
+    fn from(input: State) -> Self {
+        Some(input.0)
+    }
+}
+impl From<State> for u16 {
+    #[inline]
+    fn from(input: State) -> Self {
+        u16::from(input.0)
+    }
+}
+impl From<State> for Option<u16> {
+    #[inline]
+    fn from(input: State) -> Self {
+        Some(u16::from(input.0))
+    }
+}
+impl From<State> for u32 {
+    #[inline]
+    fn from(input: State) -> Self {
+        u32::from(input.0)
+    }
+}
+impl From<State> for Option<u32> {
+    #[inline]
+    fn from(input: State) -> Self {
+        Some(u32::from(input.0))
+    }
+}
+impl From<u8> for State {
+    #[inline]
+    fn from(value: u8) -> Self {
+        Self(value)
+    }
+}
+impl core::fmt::Debug for State {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let variants = [
+            (Self::OFF.0.into(), "OFF", "Off"),
+            (Self::ON.0.into(), "ON", "On"),
+            (Self::CYCLE.0.into(), "CYCLE", "Cycle"),
+            (Self::DISABLED.0.into(), "DISABLED", "Disabled"),
+        ];
+        pretty_print_enum(fmt, self.0.into(), &variants)
+    }
+}
+
+/// Opcode for the QueryVersion request
+pub const QUERY_VERSION_REQUEST: u8 = 0;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryVersionRequest {
+    pub client_major_version: u8,
+    pub client_minor_version: u8,
+}
+impl QueryVersionRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let client_major_version_bytes = self.client_major_version.serialize();
+        let client_minor_version_bytes = self.client_minor_version.serialize();
+        let mut request0 = [
+            major_opcode,
+            QUERY_VERSION_REQUEST,
+            0,
+            0,
+            client_major_version_bytes[0],
+            client_minor_version_bytes[0],
+            0,
+            0,
+        ];
+        request0[2..4].copy_from_slice(&(2u16).to_ne_bytes());
+        request0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryVersionReply {
+    pub sequence: u16,
+    pub length: u32,
+    pub server_major_version: u16,
+    pub server_minor_version: u16,
+}
+impl TryParse for QueryVersionReply {
+    fn try_parse(initial_value: &[u8]) -> Result<(Self, &[u8]), ParseError> {
+        let remaining = initial_value;
+        let (response_type, remaining) = u8::try_parse(remaining)?;
+        let remaining = remaining.get(1..).ok_or(ParseError::InsufficientData)?;
+        let (sequence, remaining) = u16::try_parse(remaining)?;
+        let (length, remaining) = u32::try_parse(remaining)?;
+        let (server_major_version, remaining) = u16::try_parse(remaining)?;
+        let (server_minor_version, remaining) = u16::try_parse(remaining)?;
+        let remaining = remaining.get(20..).ok_or(ParseError::InsufficientData)?;
+        if response_type != 1 {
+            return Err(ParseError::InvalidValue);
+        }
+        let result = QueryVersionReply {
+            sequence,
+            length,
+            server_major_version,
+            server_minor_version,
+        };
+        let _ = remaining;
+        let remaining = initial_value
+            .get(32 + length as usize * 4..)
+            .ok_or(ParseError::InsufficientData)?;
+        Ok((result, remaining))
+    }
+}
+
+/// Opcode for the QueryInfo request
+pub const QUERY_INFO_REQUEST: u8 = 1;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryInfoRequest {
+    pub drawable: xproto::Drawable,
+}
+impl QueryInfoRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let drawable_bytes = self.drawable.serialize();
+        let mut request0 = [
+            major_opcode,
+            QUERY_INFO_REQUEST,
+            0,
+            0,
+            drawable_bytes[0],
+            drawable_bytes[1],
+            drawable_bytes[2],
+            drawable_bytes[3],
+        ];
+        request0[2..4].copy_from_slice(&(2u16).to_ne_bytes());
+        request0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryInfoReply {
+    pub state: u8,
+    pub sequence: u16,
+    pub length: u32,
+    pub saver_window: xproto::Window,
+    pub ms_until_server: u32,
+    pub ms_since_user_input: u32,
+    pub event_mask: u32,
+    pub kind: Kind,
+}
+impl TryParse for QueryInfoReply {
+    fn try_parse(initial_value: &[u8]) -> Result<(Self, &[u8]), ParseError> {
+        let remaining = initial_value;
+        let (response_type, remaining) = u8::try_parse(remaining)?;
+        let (state, remaining) = u8::try_parse(remaining)?;
+        let (sequence, remaining) = u16::try_parse(remaining)?;
+        let (length, remaining) = u32::try_parse(remaining)?;
+        let (saver_window, remaining) = xproto::Window::try_parse(remaining)?;
+        let (ms_until_server, remaining) = u32::try_parse(remaining)?;
+        let (ms_since_user_input, remaining) = u32::try_parse(remaining)?;
+        let (event_mask, remaining) = u32::try_parse(remaining)?;
+        let (kind, remaining) = u8::try_parse(remaining)?;
+        let remaining = remaining.get(7..).ok_or(ParseError::InsufficientData)?;
+        if response_type != 1 {
+            return Err(ParseError::InvalidValue);
+        }
+        let kind = kind.into();
+        let result = QueryInfoReply {
+            state,
+            sequence,
+            length,
+            saver_window,
+            ms_until_server,
+            ms_since_user_input,
+            event_mask,
+            kind,
+        };
+        let _ = remaining;
+        let remaining = initial_value
+            .get(32 + length as usize * 4..)
+            .ok_or(ParseError::InsufficientData)?;
+        Ok((result, remaining))
+    }
+}
+
+/// Opcode for the SelectInput request
+pub const SELECT_INPUT_REQUEST: u8 = 2;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SelectInputRequest {
+    pub drawable: xproto::Drawable,
+    pub event_mask: u32,
+}
+impl SelectInputRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let drawable_bytes = self.drawable.serialize();
+        let event_mask_bytes = self.event_mask.serialize();
+        let mut request0 = [
+            major_opcode,
+            SELECT_INPUT_REQUEST,
+            0,
+            0,
+            drawable_bytes[0],
+            drawable_bytes[1],
+            drawable_bytes[2],
+            drawable_bytes[3],
+            event_mask_bytes[0],
+            event_mask_bytes[1],
+            event_mask_bytes[2],
+            event_mask_bytes[3],
+        ];
+        request0[2..4].copy_from_slice(&(3u16).to_ne_bytes());
+        request0
+    }
+}
+
+/// Auxiliary and optional information for the `set_attributes` function
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct SetAttributesAux {
+    pub background_pixmap: Option<xproto::Pixmap>,
+    pub background_pixel: Option<u32>,
+    pub border_pixmap: Option<xproto::Pixmap>,
+    pub border_pixel: Option<u32>,
+    pub bit_gravity: Option<xproto::Gravity>,
+    pub win_gravity: Option<xproto::Gravity>,
+    pub backing_store: Option<xproto::BackingStore>,
+    pub backing_planes: Option<u32>,
+    pub backing_pixel: Option<u32>,
+    pub override_redirect: Option<xproto::Bool32>,
+    pub save_under: Option<xproto::Bool32>,
+    pub event_mask: Option<u32>,
+    pub do_not_propogate_mask: Option<u32>,
+    pub colormap: Option<xproto::Colormap>,
+    pub cursor: Option<xproto::Cursor>,
+}
+impl SetAttributesAux {
+    #[allow(dead_code)]
+    fn serialize(&self, value_mask: u32) -> impl AsRef<[u8]> {
+        let mut result = Vec::new();
+        self.serialize_into(&mut result, value_mask);
+        result
+    }
+    fn serialize_into(&self, bytes: &mut Vec<u8>, value_mask: u32) {
+        debug_assert_eq!(
+            self.switch_expr(),
+            value_mask,
+            "switch `value_list` has an inconsistent discriminant"
+        );
+        if let Some(background_pixmap) = self.background_pixmap {
+            background_pixmap.serialize_into(bytes);
+        }
+        if let Some(background_pixel) = self.background_pixel {
+            background_pixel.serialize_into(bytes);
+        }
+        if let Some(border_pixmap) = self.border_pixmap {
+            border_pixmap.serialize_into(bytes);
+        }
+        if let Some(border_pixel) = self.border_pixel {
+            border_pixel.serialize_into(bytes);
+        }
+        if let Some(bit_gravity) = self.bit_gravity {
+            u32::from(bit_gravity).serialize_into(bytes);
+        }
+        if let Some(win_gravity) = self.win_gravity {
+            u32::from(win_gravity).serialize_into(bytes);
+        }
+        if let Some(backing_store) = self.backing_store {
+            u32::from(backing_store).serialize_into(bytes);
+        }
+        if let Some(backing_planes) = self.backing_planes {
+            backing_planes.serialize_into(bytes);
+        }
+        if let Some(backing_pixel) = self.backing_pixel {
+            backing_pixel.serialize_into(bytes);
+        }
+        if let Some(override_redirect) = self.override_redirect {
+            override_redirect.serialize_into(bytes);
+        }
+        if let Some(save_under) = self.save_under {
+            save_under.serialize_into(bytes);
+        }
+        if let Some(event_mask) = self.event_mask {
+            event_mask.serialize_into(bytes);
+        }
+        if let Some(do_not_propogate_mask) = self.do_not_propogate_mask {
+            do_not_propogate_mask.serialize_into(bytes);
+        }
+        if let Some(colormap) = self.colormap {
+            colormap.serialize_into(bytes);
+        }
+        if let Some(cursor) = self.cursor {
+            cursor.serialize_into(bytes);
+        }
+    }
+}
+impl SetAttributesAux {
+    fn switch_expr(&self) -> u32 {
+        let mut expr_value = 0;
+        if self.background_pixmap.is_some() {
+            expr_value |= u32::from(xproto::CW::BACK_PIXMAP);
+        }
+        if self.background_pixel.is_some() {
+            expr_value |= u32::from(xproto::CW::BACK_PIXEL);
+        }
+        if self.border_pixmap.is_some() {
+            expr_value |= u32::from(xproto::CW::BORDER_PIXMAP);
+        }
+        if self.border_pixel.is_some() {
+            expr_value |= u32::from(xproto::CW::BORDER_PIXEL);
+        }
+        if self.bit_gravity.is_some() {
+            expr_value |= u32::from(xproto::CW::BIT_GRAVITY);
+        }
+        if self.win_gravity.is_some() {
+            expr_value |= u32::from(xproto::CW::WIN_GRAVITY);
+        }
+        if self.backing_store.is_some() {
+            expr_value |= u32::from(xproto::CW::BACKING_STORE);
+        }
+        if self.backing_planes.is_some() {
+            expr_value |= u32::from(xproto::CW::BACKING_PLANES);
+        }
+        if self.backing_pixel.is_some() {
+            expr_value |= u32::from(xproto::CW::BACKING_PIXEL);
+        }
+        if self.override_redirect.is_some() {
+            expr_value |= u32::from(xproto::CW::OVERRIDE_REDIRECT);
+        }
+        if self.save_under.is_some() {
+            expr_value |= u32::from(xproto::CW::SAVE_UNDER);
+        }
+        if self.event_mask.is_some() {
+            expr_value |= u32::from(xproto::CW::EVENT_MASK);
+        }
+        if self.do_not_propogate_mask.is_some() {
+            expr_value |= u32::from(xproto::CW::DONT_PROPAGATE);
+        }
+        if self.colormap.is_some() {
+            expr_value |= u32::from(xproto::CW::COLORMAP);
+        }
+        if self.cursor.is_some() {
+            expr_value |= u32::from(xproto::CW::CURSOR);
+        }
+        expr_value
+    }
+}
+impl SetAttributesAux {
+    /// Create a new instance with all fields unset / not present.
+    #[must_use]
+    pub fn new() -> Self {
+        Default::default()
+    }
+    /// Set the `background_pixmap` field of this structure.
+    #[must_use]
+    pub fn background_pixmap<I>(mut self, value: I) -> Self
     where
-        A: Into<u32>,
+        I: Into<Option<xproto::Pixmap>>,
     {
-        select_input(self, drawable, event_mask)
+        self.background_pixmap = value.into();
+        self
     }
-    fn screensaver_set_attributes<'c, 'input>(&'c self, drawable: xproto::Drawable, x: i16, y: i16, width: u16, height: u16, border_width: u16, class: xproto::WindowClass, depth: u8, visual: xproto::Visualid, value_list: &'input SetAttributesAux) -> Result<VoidCookie<'c, Self>, ConnectionError>
+    /// Set the `background_pixel` field of this structure.
+    #[must_use]
+    pub fn background_pixel<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<u32>>,
     {
-        set_attributes(self, drawable, x, y, width, height, border_width, class, depth, visual, value_list)
+        self.background_pixel = value.into();
+        self
     }
-    fn screensaver_unset_attributes(&self, drawable: xproto::Drawable) -> Result<VoidCookie<'_, Self>, ConnectionError>
+    /// Set the `border_pixmap` field of this structure.
+    #[must_use]
+    pub fn border_pixmap<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<xproto::Pixmap>>,
     {
-        unset_attributes(self, drawable)
+        self.border_pixmap = value.into();
+        self
     }
-    fn screensaver_suspend(&self, suspend: u32) -> Result<VoidCookie<'_, Self>, ConnectionError>
+    /// Set the `border_pixel` field of this structure.
+    #[must_use]
+    pub fn border_pixel<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<u32>>,
     {
-        self::suspend(self, suspend)
+        self.border_pixel = value.into();
+        self
+    }
+    /// Set the `bit_gravity` field of this structure.
+    #[must_use]
+    pub fn bit_gravity<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<xproto::Gravity>>,
+    {
+        self.bit_gravity = value.into();
+        self
+    }
+    /// Set the `win_gravity` field of this structure.
+    #[must_use]
+    pub fn win_gravity<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<xproto::Gravity>>,
+    {
+        self.win_gravity = value.into();
+        self
+    }
+    /// Set the `backing_store` field of this structure.
+    #[must_use]
+    pub fn backing_store<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<xproto::BackingStore>>,
+    {
+        self.backing_store = value.into();
+        self
+    }
+    /// Set the `backing_planes` field of this structure.
+    #[must_use]
+    pub fn backing_planes<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<u32>>,
+    {
+        self.backing_planes = value.into();
+        self
+    }
+    /// Set the `backing_pixel` field of this structure.
+    #[must_use]
+    pub fn backing_pixel<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<u32>>,
+    {
+        self.backing_pixel = value.into();
+        self
+    }
+    /// Set the `override_redirect` field of this structure.
+    #[must_use]
+    pub fn override_redirect<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<xproto::Bool32>>,
+    {
+        self.override_redirect = value.into();
+        self
+    }
+    /// Set the `save_under` field of this structure.
+    #[must_use]
+    pub fn save_under<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<xproto::Bool32>>,
+    {
+        self.save_under = value.into();
+        self
+    }
+    /// Set the `event_mask` field of this structure.
+    #[must_use]
+    pub fn event_mask<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<u32>>,
+    {
+        self.event_mask = value.into();
+        self
+    }
+    /// Set the `do_not_propogate_mask` field of this structure.
+    #[must_use]
+    pub fn do_not_propogate_mask<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<u32>>,
+    {
+        self.do_not_propogate_mask = value.into();
+        self
+    }
+    /// Set the `colormap` field of this structure.
+    #[must_use]
+    pub fn colormap<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<xproto::Colormap>>,
+    {
+        self.colormap = value.into();
+        self
+    }
+    /// Set the `cursor` field of this structure.
+    #[must_use]
+    pub fn cursor<I>(mut self, value: I) -> Self
+    where
+        I: Into<Option<xproto::Cursor>>,
+    {
+        self.cursor = value.into();
+        self
     }
 }
 
-impl<C: RequestConnection + ?Sized> ConnectionExt for C {}
+/// Opcode for the SetAttributes request
+pub const SET_ATTRIBUTES_REQUEST: u8 = 3;
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SetAttributesRequest<'input> {
+    pub drawable: xproto::Drawable,
+    pub x: i16,
+    pub y: i16,
+    pub width: u16,
+    pub height: u16,
+    pub border_width: u16,
+    pub class: xproto::WindowClass,
+    pub depth: u8,
+    pub visual: xproto::Visualid,
+    pub value_list: Cow<'input, SetAttributesAux>,
+}
+impl<'input> SetAttributesRequest<'input> {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let length_so_far = 0;
+        let drawable_bytes = self.drawable.serialize();
+        let x_bytes = self.x.serialize();
+        let y_bytes = self.y.serialize();
+        let width_bytes = self.width.serialize();
+        let height_bytes = self.height.serialize();
+        let border_width_bytes = self.border_width.serialize();
+        let class_bytes = (u16::from(self.class) as u8).serialize();
+        let depth_bytes = self.depth.serialize();
+        let visual_bytes = self.visual.serialize();
+        let value_mask: u32 = self.value_list.switch_expr();
+        let value_mask_bytes = value_mask.serialize();
+        let mut request0 = vec![
+            major_opcode,
+            SET_ATTRIBUTES_REQUEST,
+            0,
+            0,
+            drawable_bytes[0],
+            drawable_bytes[1],
+            drawable_bytes[2],
+            drawable_bytes[3],
+            x_bytes[0],
+            x_bytes[1],
+            y_bytes[0],
+            y_bytes[1],
+            width_bytes[0],
+            width_bytes[1],
+            height_bytes[0],
+            height_bytes[1],
+            border_width_bytes[0],
+            border_width_bytes[1],
+            class_bytes[0],
+            depth_bytes[0],
+            visual_bytes[0],
+            visual_bytes[1],
+            visual_bytes[2],
+            visual_bytes[3],
+            value_mask_bytes[0],
+            value_mask_bytes[1],
+            value_mask_bytes[2],
+            value_mask_bytes[3],
+        ];
+        let length_so_far = length_so_far + request0.len();
+        let value_list_bytes = self.value_list.serialize(value_mask);
+        let referenced: &[u8] = value_list_bytes.as_ref();
+        let length_so_far = length_so_far + referenced.len();
+        let padding0 = &[0; 3][..(4 - (length_so_far % 4)) % 4];
+        let length_so_far = length_so_far + padding0.len();
+        debug_assert_eq!(0, length_so_far % 4);
+        let length = u16::try_from(length_so_far / 4).unwrap_or(0);
+        request0[2..4].copy_from_slice(&length.to_ne_bytes());
+        request0.extend_from_slice(value_list_bytes.as_ref());
+        request0.extend_from_slice(padding0.as_ref());
+        request0
+    }
+}
+
+/// Opcode for the UnsetAttributes request
+pub const UNSET_ATTRIBUTES_REQUEST: u8 = 4;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UnsetAttributesRequest {
+    pub drawable: xproto::Drawable,
+}
+impl UnsetAttributesRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let drawable_bytes = self.drawable.serialize();
+        let mut request0 = [
+            major_opcode,
+            UNSET_ATTRIBUTES_REQUEST,
+            0,
+            0,
+            drawable_bytes[0],
+            drawable_bytes[1],
+            drawable_bytes[2],
+            drawable_bytes[3],
+        ];
+        request0[2..4].copy_from_slice(&(2u16).to_ne_bytes());
+        request0
+    }
+}
+
+/// Opcode for the Suspend request
+pub const SUSPEND_REQUEST: u8 = 5;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SuspendRequest {
+    pub suspend: u32,
+}
+impl SuspendRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let suspend_bytes = self.suspend.serialize();
+        let mut request0 = [
+            major_opcode,
+            SUSPEND_REQUEST,
+            0,
+            0,
+            suspend_bytes[0],
+            suspend_bytes[1],
+            suspend_bytes[2],
+            suspend_bytes[3],
+        ];
+        request0[2..4].copy_from_slice(&(2u16).to_ne_bytes());
+        request0
+    }
+}
+
+/// Opcode for the Notify event
+pub const NOTIFY_EVENT: u8 = 0;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NotifyEvent {
+    pub response_type: u8,
+    pub state: State,
+    pub sequence: u16,
+    pub time: xproto::Timestamp,
+    pub root: xproto::Window,
+    pub window: xproto::Window,
+    pub kind: Kind,
+    pub forced: bool,
+}
+impl TryParse for NotifyEvent {
+    fn try_parse(initial_value: &[u8]) -> Result<(Self, &[u8]), ParseError> {
+        let remaining = initial_value;
+        let (response_type, remaining) = u8::try_parse(remaining)?;
+        let (state, remaining) = u8::try_parse(remaining)?;
+        let (sequence, remaining) = u16::try_parse(remaining)?;
+        let (time, remaining) = xproto::Timestamp::try_parse(remaining)?;
+        let (root, remaining) = xproto::Window::try_parse(remaining)?;
+        let (window, remaining) = xproto::Window::try_parse(remaining)?;
+        let (kind, remaining) = u8::try_parse(remaining)?;
+        let (forced, remaining) = bool::try_parse(remaining)?;
+        let remaining = remaining.get(14..).ok_or(ParseError::InsufficientData)?;
+        let state = state.into();
+        let kind = kind.into();
+        let result = NotifyEvent {
+            response_type,
+            state,
+            sequence,
+            time,
+            root,
+            window,
+            kind,
+            forced,
+        };
+        let _ = remaining;
+        let remaining = initial_value
+            .get(32..)
+            .ok_or(ParseError::InsufficientData)?;
+        Ok((result, remaining))
+    }
+}
+impl From<&NotifyEvent> for [u8; 32] {
+    fn from(input: &NotifyEvent) -> Self {
+        let response_type_bytes = input.response_type.serialize();
+        let state_bytes = u8::from(input.state).serialize();
+        let sequence_bytes = input.sequence.serialize();
+        let time_bytes = input.time.serialize();
+        let root_bytes = input.root.serialize();
+        let window_bytes = input.window.serialize();
+        let kind_bytes = u8::from(input.kind).serialize();
+        let forced_bytes = input.forced.serialize();
+        [
+            response_type_bytes[0],
+            state_bytes[0],
+            sequence_bytes[0],
+            sequence_bytes[1],
+            time_bytes[0],
+            time_bytes[1],
+            time_bytes[2],
+            time_bytes[3],
+            root_bytes[0],
+            root_bytes[1],
+            root_bytes[2],
+            root_bytes[3],
+            window_bytes[0],
+            window_bytes[1],
+            window_bytes[2],
+            window_bytes[3],
+            kind_bytes[0],
+            forced_bytes[0],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+    }
+}
+impl From<NotifyEvent> for [u8; 32] {
+    fn from(input: NotifyEvent) -> Self {
+        Self::from(&input)
+    }
+}

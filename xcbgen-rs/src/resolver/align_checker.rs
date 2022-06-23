@@ -152,10 +152,10 @@ fn check_alignment_in_type_def(type_def: &defs::TypeDef) -> Result<(), ResolveEr
             // TODO: check the required start align fields of allowed events
             Ok(())
         }
-        defs::TypeDef::Xid(_) => Ok(()),
-        defs::TypeDef::XidUnion(_) => Ok(()),
-        defs::TypeDef::Enum(_) => Ok(()),
-        defs::TypeDef::Alias(_) => Ok(()),
+        defs::TypeDef::Xid(_)
+        | defs::TypeDef::Alias(_)
+        | defs::TypeDef::XidUnion(_)
+        | defs::TypeDef::Enum(_) => Ok(()),
     }
 }
 
@@ -197,7 +197,7 @@ fn resolve_union_alignment(union_def: &defs::UnionDef) -> Result<(), ResolveErro
 
 fn resolve_switch_alignment(switch: &defs::SwitchField) -> Result<(), ResolveError> {
     let mut case_aligns = Vec::with_capacity(switch.cases.len());
-    for case in switch.cases.iter() {
+    for case in &switch.cases {
         let fields = case.fields.borrow();
         let mut field_aligns = Vec::with_capacity(fields.len());
         for field in fields.iter() {
@@ -247,7 +247,7 @@ fn resolve_switch_alignment(switch: &defs::SwitchField) -> Result<(), ResolveErr
 fn find_struct_fields_alignment(
     field_aligns: &[defs::ComplexAlignment],
 ) -> Option<defs::ComplexAlignment> {
-    for &align in [1, 2, 4, 8].iter() {
+    for &align in &[1, 2, 4, 8] {
         for offset in 0..align {
             let start_align = defs::Alignment::new(align, offset);
             if let Some(alignment) = check_struct_fields_alignment(start_align, field_aligns) {
@@ -304,7 +304,7 @@ fn check_union_fields_alignment(
 fn find_union_fields_alignment(
     field_aligns: &[defs::ComplexAlignment],
 ) -> Option<defs::ComplexAlignment> {
-    for &align in [1, 2, 4, 8].iter() {
+    for &align in &[1, 2, 4, 8] {
         for offset in 0..align {
             let start_align = defs::Alignment::new(align, offset);
             if let Some(alignment) = check_union_fields_alignment(start_align, field_aligns) {
@@ -339,7 +339,7 @@ fn check_bitcases_alignment(
 fn find_bitcases_alignment(
     case_aligns: &[defs::ComplexAlignment],
 ) -> Option<defs::ComplexAlignment> {
-    for &align in [1, 2, 4, 8].iter() {
+    for &align in &[1, 2, 4, 8] {
         for offset in 0..align {
             let start_align = defs::Alignment::new(align, offset);
             if let Some(alignment) = check_bitcases_alignment(start_align, case_aligns) {
@@ -384,34 +384,34 @@ fn resolve_field_alignment(field: &defs::FieldDef) -> Result<defs::ComplexAlignm
         }
         // FDs are not sent serialized in the structure,
         // so they do not impose any alignment.
-        defs::FieldDef::Fd(_) => Ok(defs::ComplexAlignment::zero_sized()),
-        defs::FieldDef::FdList(_) => Ok(defs::ComplexAlignment::zero_sized()),
+        defs::FieldDef::Fd(_) | defs::FieldDef::FdList(_) | defs::FieldDef::VirtualLen(_) => {
+            Ok(defs::ComplexAlignment::zero_sized())
+        }
         defs::FieldDef::Expr(expr_field) => {
             get_type_alignment(expr_field.type_.type_.get_resolved())
         }
-        // This is a virtual field (not serialized), so it
-        // does not impose any alignment
-        defs::FieldDef::VirtualLen(_) => Ok(defs::ComplexAlignment::zero_sized()),
     }
 }
 
 fn get_type_alignment(type_: &defs::TypeRef) -> Result<defs::ComplexAlignment, ResolveError> {
     match type_.get_original_type() {
         defs::TypeRef::BuiltIn(builtin_type) => match builtin_type {
-            defs::BuiltInType::Card8 => Ok(defs::ComplexAlignment::fixed_size(1, 1)),
-            defs::BuiltInType::Card16 => Ok(defs::ComplexAlignment::fixed_size(2, 2)),
-            defs::BuiltInType::Card32 => Ok(defs::ComplexAlignment::fixed_size(4, 4)),
-            defs::BuiltInType::Card64 => Ok(defs::ComplexAlignment::fixed_size(8, 8)),
-            defs::BuiltInType::Int8 => Ok(defs::ComplexAlignment::fixed_size(1, 1)),
-            defs::BuiltInType::Int16 => Ok(defs::ComplexAlignment::fixed_size(2, 2)),
-            defs::BuiltInType::Int32 => Ok(defs::ComplexAlignment::fixed_size(4, 4)),
-            defs::BuiltInType::Int64 => Ok(defs::ComplexAlignment::fixed_size(8, 8)),
-            defs::BuiltInType::Byte => Ok(defs::ComplexAlignment::fixed_size(1, 1)),
-            defs::BuiltInType::Bool => Ok(defs::ComplexAlignment::fixed_size(1, 1)),
-            defs::BuiltInType::Char => Ok(defs::ComplexAlignment::fixed_size(1, 1)),
-            defs::BuiltInType::Float => Ok(defs::ComplexAlignment::fixed_size(4, 4)),
-            defs::BuiltInType::Double => Ok(defs::ComplexAlignment::fixed_size(8, 8)),
-            defs::BuiltInType::Void => Ok(defs::ComplexAlignment::fixed_size(1, 1)),
+            defs::BuiltInType::Card16 | defs::BuiltInType::Int16 => {
+                Ok(defs::ComplexAlignment::fixed_size(2, 2))
+            }
+            defs::BuiltInType::Card32 | defs::BuiltInType::Float | defs::BuiltInType::Int32 => {
+                Ok(defs::ComplexAlignment::fixed_size(4, 4))
+            }
+            defs::BuiltInType::Card64 | defs::BuiltInType::Double | defs::BuiltInType::Int64 => {
+                Ok(defs::ComplexAlignment::fixed_size(8, 8))
+            }
+            defs::BuiltInType::Int8
+            | defs::BuiltInType::Void
+            | defs::BuiltInType::Byte
+            | defs::BuiltInType::Char => Ok(defs::ComplexAlignment::fixed_size(1, 1)),
+            defs::BuiltInType::Bool | defs::BuiltInType::Card8 => {
+                Ok(defs::ComplexAlignment::fixed_size(1, 1))
+            }
         },
         defs::TypeRef::Struct(struct_def) => {
             let struct_def = struct_def.upgrade().unwrap();
@@ -429,12 +429,11 @@ fn get_type_alignment(type_: &defs::TypeRef) -> Result<defs::ComplexAlignment, R
             // TODO: check for xge events
             Ok(defs::ComplexAlignment::fixed_size(32, 4))
         }
-        defs::TypeRef::Xid(_) => Ok(defs::ComplexAlignment::fixed_size(4, 4)),
-        defs::TypeRef::XidUnion(_) => Ok(defs::ComplexAlignment::fixed_size(4, 4)),
+        defs::TypeRef::Xid(_) | defs::TypeRef::XidUnion(_) => {
+            Ok(defs::ComplexAlignment::fixed_size(4, 4))
+        }
         // `type_resolver` should have rejected this
-        defs::TypeRef::Enum(_) => unreachable!(),
-        // should not be returned by `TypeRef::get_original_type`
-        defs::TypeRef::Alias(_) => unreachable!(),
+        defs::TypeRef::Enum(_) | defs::TypeRef::Alias(_) => unreachable!(),
     }
 }
 

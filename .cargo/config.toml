@@ -1,0 +1,17 @@
+# Compile static `RUSTFLAGS='-C target-feature=+crt-static' cargo b -p pgwm --profile optimized --target x86_64-unknown-linux-gnu`
+[target.'cfg(all())']
+rustflags = [
+    "-Dunsafe_code",
+    "-Wclippy::all",
+    "-Wclippy::pedantic",
+    "-Aclippy::too_many_arguments",
+    "-Aclippy::needless_pass_by_value",
+    "-Aclippy::let_underscore_drop",
+    "-Aclippy::too_many_lines",
+    "-Aclippy::cast_lossless",
+    "-Aclippy::cast_possible_truncation",
+    "-Aclippy::cast_sign_loss",
+    "-Aclippy::cast_possible_wrap",
+    "-Aclippy::cast_precision_loss",
+    "-Aclippy::module_name_repetitions",
+]

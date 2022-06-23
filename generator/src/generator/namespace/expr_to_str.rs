@@ -188,8 +188,9 @@ fn expr_to_str_impl(
         xcbdefs::Expression::FieldRef(field_ref_expr) => {
             let resolved_field_ref = field_ref_expr.resolved.get().unwrap();
             let value = match resolved_field_ref.ref_kind {
-                xcbdefs::FieldRefKind::LocalField => wrap_field_ref(&field_ref_expr.field_name),
-                xcbdefs::FieldRefKind::ExtParam => wrap_field_ref(&field_ref_expr.field_name),
+                xcbdefs::FieldRefKind::ExtParam | xcbdefs::FieldRefKind::LocalField => {
+                    wrap_field_ref(&field_ref_expr.field_name)
+                }
                 xcbdefs::FieldRefKind::SumOfRef => {
                     format!("x.{}", to_rust_variable_name(&field_ref_expr.field_name))
                 }

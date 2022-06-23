@@ -32,6 +32,7 @@ pub struct Module {
 
 impl Module {
     /// Create a new, empty module
+    #[must_use]
     pub fn new() -> Rc<Self> {
         Rc::new(Module {
             namespaces: RefCell::new(HashMap::new()),
@@ -62,8 +63,7 @@ impl Module {
             .find(|ns| {
                 ns.ext_info
                     .as_ref()
-                    .map(|ext_info| ext_info.name == name)
-                    .unwrap_or(false)
+                    .map_or(false, |ext_info| ext_info.name == name)
             })
             .cloned()
     }
@@ -270,7 +270,7 @@ impl Namespace {
     ///
     /// Panics if the namespace exists, but was not yet resolved.
     pub fn get_import(&self, name: &str) -> Option<Rc<Namespace>> {
-        self.imports.borrow().get(name).map(|import| import.ns())
+        self.imports.borrow().get(name).map(Import::ns)
     }
 
     /// Get an event reference by name.
@@ -364,7 +364,7 @@ impl Namespace {
             let dependencies_have_fds = imports
                 .values()
                 .filter_map(|import| import.ns.get())
-                .filter_map(|ns| ns.upgrade())
+                .filter_map(Weak::upgrade)
                 .any(|ns| ns.contains_fds());
 
             has_fd || dependencies_have_fds

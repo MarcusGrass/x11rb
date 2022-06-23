@@ -88,6 +88,7 @@ pub enum EventDef {
 
 impl EventDef {
     /// The value of the `name` attribute.
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             Self::Full(event_full_def) => &event_full_def.name,
@@ -96,6 +97,8 @@ impl EventDef {
     }
 
     /// The namespace that this event belongs to.
+    #[allow(clippy::missing_panics_doc)]
+    #[must_use]
     pub fn namespace(&self) -> Rc<Namespace> {
         match self {
             Self::Full(event_full_def) => event_full_def.namespace.upgrade().unwrap(),
@@ -111,6 +114,7 @@ impl EventDef {
     /// # Panics
     ///
     /// Panics if an `<eventcopy>` was not yet resolved.
+    #[must_use]
     pub fn get_original_full_def(&self) -> Rc<EventFullDef> {
         match self {
             Self::Full(event_full_def) => event_full_def.clone(),
@@ -119,6 +123,7 @@ impl EventDef {
     }
 
     /// Is this event XGE?
+    #[must_use]
     pub fn is_xge(&self) -> bool {
         self.get_original_full_def().xge
     }
@@ -126,6 +131,7 @@ impl EventDef {
     /// Downgrade this definition to a weak reference.
     ///
     /// See [`Rc::downgrade`].
+    #[must_use]
     pub fn as_event_ref(&self) -> EventRef {
         match self {
             Self::Full(event_full_def) => EventRef::Full(Rc::downgrade(event_full_def)),
@@ -205,6 +211,7 @@ pub enum ErrorDef {
 
 impl ErrorDef {
     /// The value of the `name` attribute.
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             Self::Full(error_full_def) => &error_full_def.name,
@@ -213,6 +220,8 @@ impl ErrorDef {
     }
 
     /// The namespace that this error belongs to.
+    #[allow(clippy::missing_panics_doc)]
+    #[must_use]
     pub fn namespace(&self) -> Rc<Namespace> {
         match self {
             Self::Full(error_full_def) => error_full_def.namespace.upgrade().unwrap(),
@@ -228,6 +237,7 @@ impl ErrorDef {
     /// # Panics
     ///
     /// Panics if an `<errorcopy>` was not yet resolved.
+    #[must_use]
     pub fn get_original_full_def(&self) -> Rc<ErrorFullDef> {
         match self {
             Self::Full(error_full_def) => error_full_def.clone(),
@@ -375,6 +385,7 @@ impl UnionDef {
     /// Get the size of the union.
     ///
     /// This function returns the size of the largest child of the union.
+    #[allow(clippy::missing_panics_doc)]
     pub fn size(&self) -> u32 {
         self.fields
             .iter()
@@ -526,6 +537,7 @@ pub struct NamedEventRef {
 impl NamedEventRef {
     /// Create a new unresolved instance.
     #[inline]
+    #[must_use]
     pub fn unresolved(name: String) -> Self {
         Self {
             name,
@@ -535,6 +547,7 @@ impl NamedEventRef {
 
     /// Create a new resolved instance.
     #[inline]
+    #[must_use]
     pub fn resolved(name: String, def: EventRef) -> Self {
         Self {
             name,
@@ -561,7 +574,7 @@ impl NamedEventRef {
     pub fn set_resolved(&self, def: EventRef) {
         self.def
             .set(def)
-            .expect("named event reference already resolved")
+            .expect("named event reference already resolved");
     }
 
     /// Returns the resolved event, or `None` if not set.
@@ -597,6 +610,7 @@ impl EventRef {
     /// # Panics
     ///
     /// Panics if an `<eventcopy>` was not yet resolved.
+    #[must_use]
     pub fn get_original_full_def(&self) -> Rc<EventFullDef> {
         match self {
             Self::Full(event_full_def) => event_full_def.upgrade().unwrap(),
@@ -606,7 +620,7 @@ impl EventRef {
                     match event_copy_def.ref_.get_resolved() {
                         EventRef::Full(event_full_def) => return event_full_def.upgrade().unwrap(),
                         EventRef::Copy(event_copy_ref) => {
-                            event_copy_def = event_copy_ref.upgrade().unwrap()
+                            event_copy_def = event_copy_ref.upgrade().unwrap();
                         }
                     }
                 }
@@ -615,6 +629,7 @@ impl EventRef {
     }
 
     /// Is this an XGE?
+    #[must_use]
     pub fn is_xge(&self) -> bool {
         self.get_original_full_def().xge
     }
@@ -622,6 +637,8 @@ impl EventRef {
     /// Upgrade this event reference to an event definition.
     ///
     /// See [`Weak::upgrade`] for more about what this really does.
+    #[allow(clippy::missing_panics_doc)]
+    #[must_use]
     pub fn as_event_def(&self) -> EventDef {
         match self {
             Self::Full(event_full_def) => EventDef::Full(event_full_def.upgrade().unwrap()),
@@ -644,6 +661,7 @@ pub struct NamedErrorRef {
 
 impl NamedErrorRef {
     /// Create a new unresolved instance.
+    #[must_use]
     pub fn unresolved(name: String) -> Self {
         Self {
             name,
@@ -653,6 +671,7 @@ impl NamedErrorRef {
 
     /// Create a new resolved instance.
     #[inline]
+    #[must_use]
     pub fn resolved(name: String, def: ErrorRef) -> Self {
         Self {
             name,
@@ -679,7 +698,7 @@ impl NamedErrorRef {
     pub fn set_resolved(&self, def: ErrorRef) {
         self.def
             .set(def)
-            .expect("named error reference already resolved")
+            .expect("named error reference already resolved");
     }
 
     /// Returns the resolved error, or `None` if not set.
@@ -715,6 +734,7 @@ impl ErrorRef {
     /// # Panics
     ///
     /// Panics if an `<errorcopy>` was not yet resolved.
+    #[must_use]
     pub fn get_original_full_def(&self) -> Rc<ErrorFullDef> {
         match self {
             Self::Full(error_full_def) => error_full_def.upgrade().unwrap(),
@@ -724,7 +744,7 @@ impl ErrorRef {
                     match error_copy_def.ref_.get_resolved() {
                         ErrorRef::Full(error_full_def) => return error_full_def.upgrade().unwrap(),
                         ErrorRef::Copy(error_copy_ref) => {
-                            error_copy_def = error_copy_ref.upgrade().unwrap()
+                            error_copy_def = error_copy_ref.upgrade().unwrap();
                         }
                     }
                 }
@@ -735,6 +755,8 @@ impl ErrorRef {
     /// Upgrade this error reference to an error definition.
     ///
     /// See [`Weak::upgrade`] for more about what this really does.
+    #[allow(clippy::missing_panics_doc)]
+    #[must_use]
     pub fn as_error_def(&self) -> ErrorDef {
         match self {
             Self::Full(error_full_def) => ErrorDef::Full(error_full_def.upgrade().unwrap()),
@@ -758,6 +780,7 @@ pub struct NamedTypeRef {
 impl NamedTypeRef {
     /// Create a new unresolved instance.
     #[inline]
+    #[must_use]
     pub fn unresolved(name: String) -> Self {
         Self {
             name,
@@ -767,6 +790,7 @@ impl NamedTypeRef {
 
     /// Create a new resolved instance.
     #[inline]
+    #[must_use]
     pub fn resolved(name: String, def: TypeRef) -> Self {
         Self {
             name,
@@ -793,7 +817,7 @@ impl NamedTypeRef {
     pub fn set_resolved(&self, def: TypeRef) {
         self.def
             .set(def)
-            .expect("named type reference already resolved")
+            .expect("named type reference already resolved");
     }
 
     /// Returns the resolved type, or `None` if not set.
@@ -843,6 +867,7 @@ impl TypeRef {
     ///
     /// This does e.g. not resolve type aliases, but instead checks that both sides reference the
     /// same type alias.
+    #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::BuiltIn(builtin1), Self::BuiltIn(builtin2)) => builtin1 == builtin2,
@@ -860,6 +885,8 @@ impl TypeRef {
     /// Get the size in bytes of this case on the wire.
     ///
     /// This returns `None` if the type does not have a constant size.
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
     pub fn size(&self) -> Option<u32> {
         match self {
             Self::BuiltIn(builtin_type) => Some(builtin_type.size()),
@@ -873,7 +900,7 @@ impl TypeRef {
             }
             Self::EventStruct(event_struct_def) => {
                 let event_struct_def = event_struct_def.upgrade().unwrap();
-                for allowed in event_struct_def.alloweds.iter() {
+                for allowed in &event_struct_def.alloweds {
                     for event in allowed.resolved.borrow().iter() {
                         let event_def = event.get_original_full_def();
                         if event_def.xge {
@@ -884,8 +911,7 @@ impl TypeRef {
 
                 Some(32)
             }
-            Self::Xid(_) => Some(4),
-            Self::XidUnion(_) => Some(4),
+            Self::Xid(_) | Self::XidUnion(_) => Some(4),
             // never used directly
             Self::Enum(_) => unreachable!(),
             Self::Alias(type_alias_def) => {
@@ -899,6 +925,7 @@ impl TypeRef {
     ///
     /// This function resolves type aliases by calling [`TypeAliasDef::get_original_type`].
     #[must_use]
+    #[allow(clippy::missing_panics_doc)]
     pub fn get_original_type(&self) -> Self {
         match self {
             Self::Alias(type_alias_def) => {

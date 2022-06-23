@@ -1,5 +1,6 @@
 use std::convert::TryFrom;
 
+use crate::generator::namespace::{get_type_parse_params, rust_value_type_is_u8};
 use xcbgen::defs as xcbdefs;
 
 use super::{
@@ -54,7 +55,7 @@ pub(super) fn emit_field_parse(
         xcbdefs::FieldDef::List(list_field) => {
             let rust_field_name = to_rust_variable_name(&list_field.name);
 
-            if generator.rust_value_type_is_u8(&list_field.element_type) {
+            if rust_value_type_is_u8(&list_field.element_type) {
                 // List of `u8`, use simple parsing
                 if let Some(list_length) = list_field.length() {
                     outln!(
@@ -121,7 +122,7 @@ pub(super) fn emit_field_parse(
                         );
                     }
                 }
-            } else if can_use_simple_list_parsing(generator, &list_field.element_type)
+            } else if can_use_simple_list_parsing(&list_field.element_type)
                 && list_field.length_expr.is_some()
                 && list_field.length().is_none()
             {
@@ -200,11 +201,8 @@ pub(super) fn emit_field_parse(
         }
         xcbdefs::FieldDef::Switch(switch_field) => {
             let rust_field_name = to_rust_variable_name(&switch_field.name);
-            let switch_struct_name = if let FieldContainer::Request(request_name) = container {
-                format!("{}Aux", request_name)
-            } else {
-                format!("{}{}", switch_prefix, to_rust_type_name(&switch_field.name))
-            };
+            let switch_struct_name =
+                format!("{}{}", switch_prefix, to_rust_type_name(&switch_field.name));
             let mut parse_params = vec![String::from("remaining")];
             for ext_param in switch_field.external_params.borrow().iter() {
                 parse_params.push(to_rust_variable_name(&ext_param.name));
@@ -217,60 +215,31 @@ pub(super) fn emit_field_parse(
                 parse_params.join(", "),
             );
         }
-        xcbdefs::FieldDef::Fd(fd_field) => {
-            let rust_field_name = to_rust_variable_name(&fd_field.name);
-            outln!(
-                out,
-                "if fds.is_empty() {{ return Err(ParseError::MissingFileDescriptors) }}"
-            );
-            outln!(out, "let {} = fds.remove(0);", rust_field_name);
+        xcbdefs::FieldDef::Fd(_) | xcbdefs::FieldDef::FdList(_) => {
+            panic!("Fds not supported");
         }
-        xcbdefs::FieldDef::FdList(fd_list_field) => {
-            let rust_field_name = to_rust_variable_name(&fd_list_field.name);
 
-            outln!(
-                out,
-                "let fds_len = {}.try_to_usize()?;",
-                expr_to_str(
-                    generator,
-                    &fd_list_field.length_expr,
-                    to_rust_variable_name,
-                    false,
-                    None,
-                    false,
-                ),
-            );
-            outln!(
-                out,
-                "if fds.len() < fds_len {{ return Err(ParseError::MissingFileDescriptors) }}",
-            );
-            outln!(out, "let mut {} = fds.split_off(fds_len);", rust_field_name);
-            outln!(out, "std::mem::swap(fds, &mut {});", rust_field_name);
-        }
         xcbdefs::FieldDef::Expr(expr_ref) => {
-            match expr_ref.expr {
-                xcbdefs::Expression::Value(_) => {
-                    // Treat this as a normal field, that we'll validate in
-                    // emit_field_post_parse.
-                    let rust_field_name = to_rust_variable_name(&expr_ref.name);
-                    outln!(
-                        out,
-                        "let ({}, remaining) = {};",
-                        rust_field_name,
-                        emit_value_parse(generator, &expr_ref.type_, from),
-                    );
-                }
-                _ => {
-                    // The only non-constant expr field we ever need to parse is
-                    // odd_length, so assert that we have that and then just write
-                    // some one-off code for it.
-                    assert_eq!(expr_ref.name, "odd_length");
-                    outln!(
-                        out,
-                        "let (odd_length, remaining) = bool::try_parse(remaining)?;"
-                    );
-                    // And there is a matching special case to use this in request parsing.
-                }
+            if let xcbdefs::Expression::Value(_) = expr_ref.expr {
+                // Treat this as a normal field, that we'll validate in
+                // emit_field_post_parse.
+                let rust_field_name = to_rust_variable_name(&expr_ref.name);
+                outln!(
+                    out,
+                    "let ({}, remaining) = {};",
+                    rust_field_name,
+                    emit_value_parse(generator, &expr_ref.type_, from),
+                );
+            } else {
+                // The only non-constant expr field we ever need to parse is
+                // odd_length, so assert that we have that and then just write
+                // some one-off code for it.
+                assert_eq!(expr_ref.name, "odd_length");
+                outln!(
+                    out,
+                    "let (odd_length, remaining) = bool::try_parse(remaining)?;"
+                );
+                // And there is a matching special case to use this in request parsing.
             }
         }
         xcbdefs::FieldDef::VirtualLen(_) => {}
@@ -305,7 +274,7 @@ fn emit_value_parse(
 ) -> String {
     let type_type = type_.type_.get_resolved();
     let rust_type = generator.type_to_rust_type(type_type);
-    let params = generator.get_type_parse_params(type_type, from);
+    let params = get_type_parse_params(type_type, from);
     format!("{}::try_parse({})?", rust_type, params.join(", "))
 }
 
@@ -320,13 +289,6 @@ fn needs_post_parse(type_: &xcbdefs::FieldValueType) -> bool {
     matches!(type_.value_set, xcbdefs::FieldValueSet::Enum(_))
 }
 
-pub(super) fn can_use_simple_list_parsing(
-    generator: &NamespaceGenerator<'_, '_>,
-    type_: &xcbdefs::FieldValueType,
-) -> bool {
-    generator
-        .get_type_parse_params(type_.type_.get_resolved(), "")
-        .len()
-        == 1
-        && !needs_post_parse(type_)
+pub(super) fn can_use_simple_list_parsing(type_: &xcbdefs::FieldValueType) -> bool {
+    get_type_parse_params(type_.type_.get_resolved(), "").len() == 1 && !needs_post_parse(type_)
 }

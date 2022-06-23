@@ -149,27 +149,26 @@ fn parse_inherits_impl(input: &mut impl BufRead) -> Result<Vec<String>, IOError>
 
         let begin = b"Inherits";
         if buffer.starts_with(begin) {
-            let mut result = Vec::new();
-
-            let mut to_parse = &buffer[begin.len()..];
-
             fn skip_while(mut slice: &[u8], f: impl Fn(u8) -> bool) -> &[u8] {
                 while !slice.is_empty() && f(slice[0]) {
-                    slice = &slice[1..]
+                    slice = &slice[1..];
                 }
                 slice
             }
+
+            let mut result = Vec::new();
+
+            let mut to_parse = &buffer[begin.len()..];
 
             // Skip all spaces
             to_parse = skip_while(to_parse, |c| c == b' ');
 
             // Now we need an equal sign
             if to_parse.get(0) == Some(&b'=') {
-                to_parse = &to_parse[1..];
-
                 fn should_skip(c: u8) -> bool {
                     matches!(c, b' ' | b'\t' | b'\n' | b';' | b',')
                 }
+                to_parse = &to_parse[1..];
 
                 // Iterate over the pieces
                 for mut part in to_parse.split(|&x| x == b':') {

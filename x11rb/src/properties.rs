@@ -2,11 +2,11 @@
 
 use std::convert::TryInto;
 
-use crate::connection::RequestConnection;
 use crate::cookie::{Cookie, VoidCookie};
 use crate::errors::{ConnectionError, ParseError, ReplyError};
-use crate::protocol::xproto::{self, Atom, AtomEnum, GetPropertyReply, Window};
 use crate::x11_utils::{Serialize, TryParse};
+use crate::xcb::xproto::{self, Atom, AtomEnum, GetPropertyReply, Window};
+use crate::SocketConnection;
 
 macro_rules! property_cookie {
     {
@@ -16,24 +16,13 @@ macro_rules! property_cookie {
     } => {
         $(#[$meta])*
         #[derive(Debug)]
-        pub struct $cookie_name<'a, Conn: RequestConnection + ?Sized>(Cookie<'a, Conn, GetPropertyReply>);
+        pub struct $cookie_name(Cookie<GetPropertyReply>);
 
-        impl<'a, Conn> $cookie_name<'a, Conn>
-        where
-            Conn: RequestConnection + ?Sized,
+        impl $cookie_name
         {
             /// Get the reply that the server sent.
-            pub fn reply(self) -> Result<$struct_name, ReplyError> {
-                Ok($from_reply(self.0.reply()?)?)
-            }
-
-            /// Get the reply that the server sent, but have errors handled as events.
-            pub fn reply_unchecked(self) -> Result<Option<$struct_name>, ConnectionError> {
-                self.0
-                    .reply_unchecked()?
-                    .map($from_reply)
-                    .transpose()
-                    .map_err(Into::into)
+            pub fn reply(self, con: &mut SocketConnection) -> Result<$struct_name, ReplyError> {
+                Ok($from_reply(self.0.reply(con)?)?)
             }
         }
     }
@@ -49,12 +38,9 @@ property_cookie! {
     WmClass::from_reply,
 }
 
-impl<'a, Conn> WmClassCookie<'a, Conn>
-where
-    Conn: RequestConnection + ?Sized,
-{
+impl WmClassCookie {
     /// Send a `GetProperty` request for the `WM_CLASS` property of the given window
-    pub fn new(conn: &'a Conn, window: Window) -> Result<Self, ConnectionError> {
+    pub fn new(conn: &mut SocketConnection, window: Window) -> Result<Self, ConnectionError> {
         Ok(Self(xproto::get_property(
             conn,
             false,
@@ -63,47 +49,21 @@ where
             AtomEnum::STRING,
             0,
             2048,
+            false,
         )?))
     }
 }
 
 /// The value of a window's `WM_CLASS` property.
-///
-/// Usage example:
-/// ```
-/// use x11rb::connection::Connection;
-/// use x11rb::errors::ConnectionError;
-/// use x11rb::properties::WmClass;
-/// use x11rb::protocol::xproto::Window;
-///
-/// fn print_class_instance(
-///     conn: &impl Connection,
-///     window: Window,
-/// ) -> Result<bool, ConnectionError> {
-///     let wm_class = match WmClass::get(conn, window)?.reply_unchecked()? {
-///         Some(wm_class) => wm_class,
-///         None => return Ok(false), // Getting the property failed
-///     };
-///     // Note that the WM_CLASS property is not actually encoded in utf8.
-///     // ASCII values are most common and for these from_utf8() should be fine.
-///     let class = std::str::from_utf8(wm_class.class());
-///     let instance = std::str::from_utf8(wm_class.instance());
-///     println!(
-///         "For window {:x}, class is '{:?}' and instance is '{:?}'",
-///         window, class, instance,
-///     );
-///     Ok(true)
-/// }
-/// ```
 #[derive(Debug)]
 pub struct WmClass(GetPropertyReply, usize);
 
 impl WmClass {
     /// Send a `GetProperty` request for the `WM_CLASS` property of the given window
-    pub fn get<C: RequestConnection>(
-        conn: &C,
+    pub fn get(
+        conn: &mut SocketConnection,
         window: Window,
-    ) -> Result<WmClassCookie<'_, C>, ConnectionError> {
+    ) -> Result<WmClassCookie, ConnectionError> {
         WmClassCookie::new(conn, window)
     }
 
@@ -125,11 +85,13 @@ impl WmClass {
     }
 
     /// Get the instance contained in this `WM_CLASS` property
+    #[must_use]
     pub fn instance(&self) -> &[u8] {
         &self.0.value[0..self.1]
     }
 
     /// Get the class contained in this `WM_CLASS` property
+    #[must_use]
     pub fn class(&self) -> &[u8] {
         let start = self.1 + 1;
         if start >= self.0.value.len() {
@@ -163,13 +125,10 @@ property_cookie! {
 
 const NUM_WM_SIZE_HINTS_ELEMENTS: u32 = 18;
 
-impl<'a, Conn> WmSizeHintsCookie<'a, Conn>
-where
-    Conn: RequestConnection + ?Sized,
-{
+impl WmSizeHintsCookie {
     /// Send a `GetProperty` request for the given property of the given window
     pub fn new(
-        conn: &'a Conn,
+        conn: &mut SocketConnection,
         window: Window,
         property: impl Into<Atom>,
     ) -> Result<Self, ConnectionError> {
@@ -181,6 +140,7 @@ where
             AtomEnum::WM_SIZE_HINTS,
             0,
             NUM_WM_SIZE_HINTS_ELEMENTS,
+            false,
         )?))
     }
 }
@@ -208,6 +168,7 @@ pub struct AspectRatio {
 
 impl AspectRatio {
     /// Create a new aspect ratio with the given values.
+    #[must_use]
     pub fn new(numerator: i32, denominator: i32) -> Self {
         Self {
             numerator,
@@ -268,24 +229,25 @@ pub struct WmSizeHints {
 
 impl WmSizeHints {
     /// Get a new, empty `WmSizeHints` structure.
+    #[must_use]
     pub fn new() -> Self {
         Default::default()
     }
 
     /// Send a `GetProperty` request for the given property of the given window
-    pub fn get<C: RequestConnection>(
-        conn: &C,
+    pub fn get(
+        conn: &mut SocketConnection,
         window: Window,
         property: impl Into<Atom>,
-    ) -> Result<WmSizeHintsCookie<'_, C>, ConnectionError> {
+    ) -> Result<WmSizeHintsCookie, ConnectionError> {
         WmSizeHintsCookie::new(conn, window, property)
     }
 
     /// Send a `GetProperty` request for the `WM_NORMAL_HINTS` property of the given window
-    pub fn get_normal_hints<C: RequestConnection>(
-        conn: &C,
+    pub fn get_normal_hints(
+        conn: &mut SocketConnection,
         window: Window,
-    ) -> Result<WmSizeHintsCookie<'_, C>, ConnectionError> {
+    ) -> Result<WmSizeHintsCookie, ConnectionError> {
         Self::get(conn, window, AtomEnum::WM_NORMAL_HINTS)
     }
 
@@ -301,21 +263,23 @@ impl WmSizeHints {
     }
 
     /// Set these `WM_SIZE_HINTS` on some window as the `WM_NORMAL_HINTS` property.
-    pub fn set_normal_hints<'a, C: RequestConnection + ?Sized>(
+    pub fn set_normal_hints(
         &self,
-        conn: &'a C,
+        conn: &mut SocketConnection,
         window: Window,
-    ) -> Result<VoidCookie<'a, C>, ConnectionError> {
-        self.set(conn, window, AtomEnum::WM_NORMAL_HINTS)
+        forget: bool,
+    ) -> Result<VoidCookie, ConnectionError> {
+        self.set(conn, window, AtomEnum::WM_NORMAL_HINTS, forget)
     }
 
     /// Set these `WM_SIZE_HINTS` on some window as the given property.
-    pub fn set<'a, C: RequestConnection + ?Sized>(
+    pub fn set(
         &self,
-        conn: &'a C,
+        conn: &mut SocketConnection,
         window: Window,
         property: impl Into<Atom>,
-    ) -> Result<VoidCookie<'a, C>, ConnectionError> {
+        forget: bool,
+    ) -> Result<VoidCookie, ConnectionError> {
         let data = self.serialize();
         xproto::change_property(
             conn,
@@ -326,6 +290,7 @@ impl WmSizeHints {
             32,
             NUM_WM_SIZE_HINTS_ELEMENTS,
             &data,
+            forget,
         )
     }
 }
@@ -449,12 +414,9 @@ property_cookie! {
 
 const NUM_WM_HINTS_ELEMENTS: u32 = 9;
 
-impl<'a, Conn> WmHintsCookie<'a, Conn>
-where
-    Conn: RequestConnection + ?Sized,
-{
+impl WmHintsCookie {
     /// Send a `GetProperty` request for the `WM_CLASS` property of the given window
-    pub fn new(conn: &'a Conn, window: Window) -> Result<Self, ConnectionError> {
+    pub fn new(conn: &mut SocketConnection, window: Window) -> Result<Self, ConnectionError> {
         Ok(Self(xproto::get_property(
             conn,
             false,
@@ -463,7 +425,12 @@ where
             AtomEnum::WM_HINTS,
             0,
             NUM_WM_HINTS_ELEMENTS,
+            false,
         )?))
+    }
+
+    pub fn forget(self, conn: &mut SocketConnection) {
+        self.0.forget(conn);
     }
 }
 
@@ -528,15 +495,16 @@ pub struct WmHints {
 
 impl WmHints {
     /// Get a new, empty `WmSizeHints` structure.
+    #[must_use]
     pub fn new() -> Self {
         Default::default()
     }
 
     /// Send a `GetProperty` request for the `WM_HINTS` property of the given window
-    pub fn get<C: RequestConnection>(
-        conn: &C,
+    pub fn get(
+        conn: &mut SocketConnection,
         window: Window,
-    ) -> Result<WmHintsCookie<'_, C>, ConnectionError> {
+    ) -> Result<WmHintsCookie, ConnectionError> {
         WmHintsCookie::new(conn, window)
     }
 
@@ -553,11 +521,12 @@ impl WmHints {
     }
 
     /// Set these `WM_HINTS` on some window.
-    pub fn set<'a, C: RequestConnection + ?Sized>(
+    pub fn set(
         &self,
-        conn: &'a C,
+        conn: &mut SocketConnection,
         window: Window,
-    ) -> Result<VoidCookie<'a, C>, ConnectionError> {
+        forget: bool,
+    ) -> Result<VoidCookie, ConnectionError> {
         let data = self.serialize();
         xproto::change_property(
             conn,
@@ -568,6 +537,7 @@ impl WmHints {
             32,
             NUM_WM_HINTS_ELEMENTS,
             &data,
+            forget,
         )
     }
 }
@@ -663,10 +633,10 @@ fn parse_with_flag<T: TryParse>(
     bit: u32,
 ) -> Result<(Option<T>, &[u8]), ParseError> {
     let (value, remaining) = T::try_parse(remaining)?;
-    if flags & bit != 0 {
-        Ok((Some(value), remaining))
-    } else {
+    if flags & bit == 0 {
         Ok((None, remaining))
+    } else {
+        Ok((Some(value), remaining))
     }
 }
 

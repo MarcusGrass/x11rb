@@ -17,6 +17,7 @@ impl Alignment {
     ///
     /// Panics if `align` is not a power of two or if `offset` is
     /// equal or greater than `align`.
+    #[must_use]
     pub fn new(align: u32, offset: u32) -> Self {
         assert!(align.is_power_of_two() && offset < align);
         Self { align, offset }
@@ -24,12 +25,14 @@ impl Alignment {
 
     /// Returns the value of `align`.
     #[inline]
+    #[must_use]
     pub fn align(self) -> u32 {
         self.align
     }
 
     /// Returns the value of `offset`.
     #[inline]
+    #[must_use]
     pub fn offset(self) -> u32 {
         self.offset
     }
@@ -50,27 +53,28 @@ impl Alignment {
     }
 
     /// Returns an alignment that meets `self` and `other`.
+    #[must_use]
     pub fn union(self, other: Self) -> Option<Self> {
         match self.align.cmp(&other.align) {
             std::cmp::Ordering::Less => {
-                if (other.offset % self.align) != self.offset {
-                    None
-                } else {
+                if (other.offset % self.align) == self.offset {
                     Some(other)
+                } else {
+                    None
                 }
             }
             std::cmp::Ordering::Equal => {
-                if self.offset != other.offset {
-                    None
-                } else {
+                if self.offset == other.offset {
                     Some(self)
+                } else {
+                    None
                 }
             }
             std::cmp::Ordering::Greater => {
-                if (self.offset % other.align) != other.align {
-                    None
-                } else {
+                if (self.offset % other.align) == other.align {
                     Some(self)
+                } else {
+                    None
                 }
             }
         }
@@ -83,23 +87,24 @@ impl Alignment {
         let offset1 = self.offset % align;
         let offset2 = other.offset % align;
 
-        if offset1 != offset2 {
+        if offset1 == offset2 {
+            Self {
+                align,
+                offset: offset1,
+            }
+        } else {
             let align1 = (1u32 << offset1.trailing_zeros().min(31)).min(align);
             let align2 = (1u32 << offset2.trailing_zeros().min(31)).min(align);
             Self {
                 align: align1.min(align2),
                 offset: 0,
             }
-        } else {
-            Self {
-                align,
-                offset: offset1,
-            }
         }
     }
 
     /// Returns whether `self` meets the alignment requirements
     /// of `required`.
+    #[must_use]
     pub fn meets(self, required: Self) -> bool {
         // `self.align >= required.align` is equivalent to
         // `self.align % required.align == 0` because `align`
@@ -127,6 +132,7 @@ impl VariableSize {
     /// # Panics
     ///
     /// Panics if `incr` neither zero nor a power of 2.
+    #[must_use]
     pub fn new(base: u32, incr: u32) -> Self {
         assert!(incr == 0 || incr.is_power_of_two());
         Self { base, incr }
@@ -134,12 +140,14 @@ impl VariableSize {
 
     /// Returns the value of `base`.
     #[inline]
+    #[must_use]
     pub fn base(self) -> u32 {
         self.base
     }
 
     /// Returns the value of `incr`.
     #[inline]
+    #[must_use]
     pub fn incr(self) -> u32 {
         self.incr
     }
@@ -166,6 +174,7 @@ impl VariableSize {
 
     /// Create an instance that describes a zero-sized type.
     #[inline]
+    #[must_use]
     pub fn zero() -> Self {
         Self { base: 0, incr: 0 }
     }
@@ -255,11 +264,10 @@ impl VariableSize {
         if n == 0 {
             Self::zero()
         } else {
-            let (base, base_overflow) = self
-                .base
-                .checked_mul(n)
-                .map(|base| (base, false))
-                .unwrap_or_else(|| Self::reduce_base(self.base, self.incr).overflowing_mul(n));
+            let (base, base_overflow) = self.base.checked_mul(n).map_or_else(
+                || Self::reduce_base(self.base, self.incr).overflowing_mul(n),
+                |base| (base, false),
+            );
 
             let (mut incr, incr_overflow) = self.incr.overflowing_mul(n);
             if incr_overflow {
@@ -308,6 +316,7 @@ impl ComplexAlignment {
     /// Create alignment information for some structure with a fixed size `size` that needs to be
     /// aligned to a multiple of `align`.
     #[inline]
+    #[must_use]
     pub fn fixed_size(size: u32, align: u32) -> Self {
         Self {
             begin: Alignment { align, offset: 0 },
@@ -318,11 +327,13 @@ impl ComplexAlignment {
 
     /// Create alignment information for an empty structure.
     #[inline]
+    #[must_use]
     pub fn zero_sized() -> Self {
         Self::fixed_size(0, 1)
     }
 
     /// Get the alignment after the structure.
+    #[must_use]
     pub fn end_align(self) -> Alignment {
         match self.body {
             AlignBody::Size(size) => self.begin.advance_variable_size(size),
@@ -334,10 +345,9 @@ impl ComplexAlignment {
     ///
     /// This returns `None` if the alignment of this structure is violated, i.e. it cannot be
     /// repeated.
+    #[must_use]
     pub fn zero_one_or_many(self) -> Option<Self> {
-        if !self.end_align().meets(self.begin) {
-            None
-        } else {
+        if self.end_align().meets(self.begin) {
             match self.body {
                 AlignBody::Size(size) => Some(Self {
                     begin: self.begin,
@@ -350,6 +360,8 @@ impl ComplexAlignment {
                     internal_align: self.internal_align,
                 }),
             }
+        } else {
+            None
         }
     }
 
@@ -357,6 +369,7 @@ impl ComplexAlignment {
     ///
     /// This returns `None` if the alignment of this structure is violated, i.e. it cannot be
     /// repeated.
+    #[must_use]
     pub fn repeat_n(self, n: u32) -> Option<Self> {
         if n == 0 {
             Some(Self {
@@ -383,10 +396,9 @@ impl ComplexAlignment {
     }
 
     /// Get a new alignment description for the combination of two types right after each other.
+    #[must_use]
     pub fn append(self, next: Self) -> Option<Self> {
-        if !self.end_align().meets(next.begin) {
-            None
-        } else {
+        if self.end_align().meets(next.begin) {
             let new_body = match (self.body, next.body) {
                 (AlignBody::Size(curr_size), AlignBody::Size(next_size)) => {
                     AlignBody::Size(curr_size.append(next_size))
@@ -401,15 +413,16 @@ impl ComplexAlignment {
                 body: new_body,
                 internal_align: self.internal_align.max(next.internal_align),
             })
+        } else {
+            None
         }
     }
 
     /// Compute a new alignment description for two types appearing in a union, i.e. both starting
     /// at the same position.
+    #[must_use]
     pub fn union_append(self, other: Self) -> Option<Self> {
-        if !self.begin.meets(other.begin) {
-            None
-        } else {
+        if self.begin.meets(other.begin) {
             let new_body = match (self.body, other.body) {
                 (AlignBody::Size(curr_size), AlignBody::Size(next_size)) => {
                     AlignBody::Size(curr_size.union(next_size))
@@ -435,16 +448,17 @@ impl ComplexAlignment {
                 body: new_body,
                 internal_align: self.internal_align.max(other.internal_align),
             })
+        } else {
+            None
         }
     }
 
     /// Compute alignment information of types that can appear optionally after each other.
     ///
     /// This computes the alignment for the concatenation of bitcases.
+    #[must_use]
     pub fn bitcase_append(self, next: Self) -> Option<Self> {
-        if !self.end_align().meets(next.begin) {
-            None
-        } else {
+        if self.end_align().meets(next.begin) {
             let new_body = match (self.body, next.body) {
                 (AlignBody::Size(curr_size), AlignBody::Size(next_size)) => {
                     AlignBody::Size(curr_size.union(curr_size.append(next_size)))
@@ -471,6 +485,8 @@ impl ComplexAlignment {
                 body: new_body,
                 internal_align: self.internal_align.max(next.internal_align),
             })
+        } else {
+            None
         }
     }
 }

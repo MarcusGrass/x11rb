@@ -7,7 +7,6 @@ mod output;
 mod error_events;
 mod namespace;
 mod requests_replies;
-mod resources;
 mod special_cases;
 
 use output::Output;
@@ -23,7 +22,7 @@ pub(crate) fn generate(module: &xcbgen::defs::Module) -> Vec<Generated> {
 
     let mut main_proto_out = Output::new();
     let mut main_x11rb_out = Output::new();
-    for out in vec![&mut main_proto_out, &mut main_x11rb_out].into_iter() {
+    for out in vec![&mut main_proto_out, &mut main_x11rb_out] {
         write_code_header(out);
         outln!(out, "//! Bindings to the X11 protocol.");
         outln!(out, "//!");
@@ -46,37 +45,18 @@ pub(crate) fn generate(module: &xcbgen::defs::Module) -> Vec<Generated> {
         );
     }
     outln!(main_proto_out, "");
-    outln!(main_proto_out, "use alloc::borrow::Cow;");
-    outln!(main_proto_out, "use alloc::vec::Vec;");
+    outln!(main_proto_out, "#[allow(unused_imports)]");
+    outln!(main_proto_out, "use std::borrow::Cow;");
     outln!(main_proto_out, "use core::convert::TryInto;");
     outln!(main_proto_out, "use crate::errors::ParseError;");
-    outln!(main_proto_out, "use crate::RawFdContainer;");
     outln!(
         main_proto_out,
-        "use crate::x11_utils::{{TryParse, TryParseFd, X11Error, ReplyRequest, ReplyFDsRequest}};"
+        "use crate::x11_utils::{{TryParse, X11Error}};"
     );
     outln!(
         main_proto_out,
-        "use crate::x11_utils::{{ExtInfoProvider, ReplyParsingFunction, RequestHeader}};"
+        "use crate::x11_utils::{{ExtensionInfoProvider}};"
     );
-    outln!(main_proto_out, "");
-
-    outln!(main_proto_out, "fn parse_reply<'a, R: ReplyRequest>(bytes: &'a [u8], _: &mut Vec<RawFdContainer>) -> Result<(Reply, &'a [u8]), ParseError> {{");
-    main_proto_out.indented(|out| {
-        outln!(out, "let (reply, remaining) = R::Reply::try_parse(bytes)?;");
-        outln!(out, "Ok((reply.into(), remaining))");
-    });
-    outln!(main_proto_out, "}}");
-    outln!(main_proto_out, "#[allow(dead_code)]");
-    outln!(main_proto_out, "fn parse_reply_fds<'a, R: ReplyFDsRequest>(bytes: &'a [u8], fds: &mut Vec<RawFdContainer>) -> Result<(Reply, &'a [u8]), ParseError> {{");
-    main_proto_out.indented(|out| {
-        outln!(
-            out,
-            "let (reply, remaining) = R::Reply::try_parse_fd(bytes, fds)?;"
-        );
-        outln!(out, "Ok((reply.into(), remaining))");
-    });
-    outln!(main_proto_out, "}}");
     outln!(main_proto_out, "");
 
     let caches = RefCell::new(namespace::helpers::Caches::default());
@@ -86,15 +66,12 @@ pub(crate) fn generate(module: &xcbgen::defs::Module) -> Vec<Generated> {
     for ns in module.sorted_namespaces() {
         let mut ns_proto_out = Output::new();
         let mut ns_x11rb_out = Output::new();
-        let wrapper_info = resources::for_extension(&ns.header);
         namespace::generate(
-            module,
             &ns,
             &caches,
             &mut ns_proto_out,
             &mut ns_x11rb_out,
             &mut enum_cases,
-            wrapper_info,
         );
         out_map.push(Generated {
             file_name: PathBuf::from(format!("{}.rs", ns.header)),
@@ -102,7 +79,7 @@ pub(crate) fn generate(module: &xcbgen::defs::Module) -> Vec<Generated> {
             x11rb: ns_x11rb_out.into_data(),
         });
 
-        for out in vec![&mut main_proto_out, &mut main_x11rb_out].into_iter() {
+        for out in vec![&mut main_proto_out, &mut main_x11rb_out] {
             if ext_has_feature(&ns.header) {
                 outln!(out, "#[cfg(feature = \"{}\")]", ns.header);
             }
@@ -115,13 +92,8 @@ pub(crate) fn generate(module: &xcbgen::defs::Module) -> Vec<Generated> {
     error_events::generate(&mut main_proto_out, module);
 
     outln!(main_x11rb_out, "");
-    outln!(main_x11rb_out, "pub use x11rb_protocol::protocol::Request;");
-    outln!(main_x11rb_out, "pub use x11rb_protocol::protocol::Reply;");
-    outln!(
-        main_x11rb_out,
-        "pub use x11rb_protocol::protocol::ErrorKind;"
-    );
-    outln!(main_x11rb_out, "pub use x11rb_protocol::protocol::Event;");
+    outln!(main_x11rb_out, "pub use crate::protocol::ErrorKind;");
+    outln!(main_x11rb_out, "pub use crate::protocol::Event;");
 
     out_map.push(Generated {
         file_name: PathBuf::from("mod.rs"),
@@ -146,12 +118,6 @@ fn write_code_header(out: &mut Output) {
 }
 
 fn camel_case_to_snake(arg: &str) -> String {
-    assert!(
-        arg.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
-        "{:?}",
-        arg
-    );
-
     // Matches "[A-Z][a-z0-9]+|[A-Z]+(?![a-z0-9])|[a-z0-9]+"
     struct Matcher<'a> {
         remaining: &'a str,
@@ -185,37 +151,36 @@ fn camel_case_to_snake(arg: &str) -> String {
             let next_match = loop {
                 let (chr_i, chr) = chr_iter
                     .next()
-                    .map(|(chr_i, chr)| (chr_i, Some(chr)))
-                    .unwrap_or((s.len(), None));
+                    .map_or_else(|| (s.len(), None), |(chr_i, chr)| (chr_i, Some(chr)));
                 match state {
                     State::Begin => match chr {
                         None => break None,
                         Some('A'..='Z') => state = State::OneUpper(chr_i),
-                        Some('a'..='z') | Some('0'..='9') => state = State::LowerOrDigit(chr_i),
+                        Some('a'..='z' | '0'..='9') => state = State::LowerOrDigit(chr_i),
                         Some(_) => state = State::Begin,
                     },
                     State::OneUpper(begin_i) => match chr {
                         Some('A'..='Z') => state = State::ManyUpper(begin_i),
-                        Some('a'..='z') | Some('0'..='9') => {
-                            state = State::OneUpperThenLowerOrDigit(begin_i)
+                        Some('a'..='z' | '0'..='9') => {
+                            state = State::OneUpperThenLowerOrDigit(begin_i);
                         }
                         _ => break Some((&s[begin_i..chr_i], &s[chr_i..])),
                     },
                     State::OneUpperThenLowerOrDigit(begin_i) => match chr {
-                        Some('a'..='z') | Some('0'..='9') => {
-                            state = State::OneUpperThenLowerOrDigit(begin_i)
+                        Some('a'..='z' | '0'..='9') => {
+                            state = State::OneUpperThenLowerOrDigit(begin_i);
                         }
                         _ => break Some((&s[begin_i..chr_i], &s[chr_i..])),
                     },
                     State::ManyUpper(begin_i) => match chr {
                         Some('A'..='Z') => state = State::ManyUpper(begin_i),
-                        Some('a'..='z') | Some('0'..='9') => {
+                        Some('a'..='z' | '0'..='9') => {
                             break Some((&s[begin_i..(chr_i - 1)], &s[(chr_i - 1)..]));
                         }
                         _ => break Some((&s[begin_i..chr_i], &s[chr_i..])),
                     },
                     State::LowerOrDigit(begin_i) => match chr {
-                        Some('a'..='z') | Some('0'..='9') => state = State::LowerOrDigit(begin_i),
+                        Some('a'..='z' | '0'..='9') => state = State::LowerOrDigit(begin_i),
                         _ => break Some((&s[begin_i..chr_i], &s[chr_i..])),
                     },
                 }
@@ -229,6 +194,11 @@ fn camel_case_to_snake(arg: &str) -> String {
             }
         }
     }
+    assert!(
+        arg.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
+        "{:?}",
+        arg
+    );
 
     let mut r = String::new();
     for match_str in Matcher::new(arg) {
@@ -267,15 +237,4 @@ pub(crate) fn get_ns_name_prefix(ns: &xcbgen::defs::Namespace) -> String {
     } else {
         String::new()
     }
-}
-
-struct CreateInfo<'a> {
-    request_name: &'a str,
-    created_argument: &'a str,
-}
-
-struct ResourceInfo<'a> {
-    resource_name: &'a str,
-    create_requests: &'a [CreateInfo<'a>],
-    free_request: &'a str,
 }

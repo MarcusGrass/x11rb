@@ -16,7 +16,11 @@
     unused_qualifications
 )]
 #![forbid(unsafe_code)]
-
+#![allow(
+    clippy::doc_markdown,
+    clippy::similar_names,
+    clippy::missing_errors_doc
+)]
 pub mod defs;
 mod parser;
 mod resolver;

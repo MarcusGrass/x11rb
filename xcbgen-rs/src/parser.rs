@@ -117,16 +117,16 @@ impl Parser {
                 }
                 "request" => self.parse_request_def(child_node, &namespace)?,
                 "event" => self.parse_event_full_def(child_node, &namespace)?,
-                "eventcopy" => self.parse_event_copy_def(child_node, &namespace)?,
+                "eventcopy" => Self::parse_event_copy_def(child_node, &namespace)?,
                 "error" => self.parse_error_full_def(child_node, &namespace)?,
-                "errorcopy" => self.parse_error_copy_def(child_node, &namespace)?,
+                "errorcopy" => Self::parse_error_copy_def(child_node, &namespace)?,
                 "struct" => self.parse_struct_def(child_node, &namespace)?,
                 "union" => self.parse_union_def(child_node, &namespace)?,
-                "eventstruct" => self.parse_event_struct_def(child_node, &namespace)?,
-                "xidtype" => self.parse_xid_type_def(child_node, &namespace)?,
-                "xidunion" => self.parse_xid_union_def(child_node, &namespace)?,
-                "enum" => self.parse_enum_def(child_node, &namespace)?,
-                "typedef" => self.parse_type_alias_def(child_node, &namespace)?,
+                "eventstruct" => Self::parse_event_struct_def(child_node, &namespace)?,
+                "xidtype" => Self::parse_xid_type_def(child_node, &namespace)?,
+                "xidunion" => Self::parse_xid_union_def(child_node, &namespace)?,
+                "enum" => Self::parse_enum_def(child_node, &namespace)?,
+                "typedef" => Self::parse_type_alias_def(child_node, &namespace)?,
                 _ => return Err(ParseError::InvalidXml),
             }
         }
@@ -159,7 +159,7 @@ impl Parser {
                 if required_start_align.is_some() {
                     return Err(ParseError::InvalidXml);
                 }
-                required_start_align = Some(self.parse_required_start_align(child_node)?);
+                required_start_align = Some(Self::parse_required_start_align(child_node)?);
             } else if let Some(field) = self.try_parse_field_def(child_node)? {
                 fields.push(field);
             } else if child_node.has_tag_name("reply") {
@@ -171,7 +171,7 @@ impl Parser {
                 if doc.is_some() {
                     return Err(ParseError::InvalidXml);
                 }
-                doc = Some(self.parse_doc(child_node)?);
+                doc = Some(Self::parse_doc(child_node)?);
             } else {
                 return Err(ParseError::InvalidXml);
             }
@@ -190,10 +190,10 @@ impl Parser {
         if let Some(ref reply) = request.reply {
             reply.request.set(Rc::downgrade(&request)).unwrap();
         }
-        if !ns.insert_request_def(name.into(), request) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_request_def(name.into(), request) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
@@ -216,14 +216,14 @@ impl Parser {
                 if required_start_align.is_some() {
                     return Err(ParseError::InvalidXml);
                 }
-                required_start_align = Some(self.parse_required_start_align(child_node)?);
+                required_start_align = Some(Self::parse_required_start_align(child_node)?);
             } else if let Some(field) = self.try_parse_field_def(child_node)? {
                 fields.push(field);
             } else if child_node.has_tag_name("doc") {
                 if doc.is_some() {
                     return Err(ParseError::InvalidXml);
                 }
-                doc = Some(self.parse_doc(child_node)?);
+                doc = Some(Self::parse_doc(child_node)?);
             } else {
                 return Err(ParseError::InvalidXml);
             }
@@ -262,14 +262,14 @@ impl Parser {
                 if required_start_align.is_some() {
                     return Err(ParseError::InvalidXml);
                 }
-                required_start_align = Some(self.parse_required_start_align(child_node)?);
+                required_start_align = Some(Self::parse_required_start_align(child_node)?);
             } else if let Some(field) = self.try_parse_field_def(child_node)? {
                 fields.push(field);
             } else if child_node.has_tag_name("doc") {
                 if doc.is_some() {
                     return Err(ParseError::InvalidXml);
                 }
-                doc = Some(self.parse_doc(child_node)?);
+                doc = Some(Self::parse_doc(child_node)?);
             } else {
                 return Err(ParseError::InvalidXml);
             }
@@ -285,15 +285,14 @@ impl Parser {
             fields: RefCell::new(fields),
             doc,
         });
-        if !ns.insert_event_def(name.into(), defs::EventDef::Full(event_full)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_event_def(name.into(), defs::EventDef::Full(event_full)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
     fn parse_event_copy_def(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
         ns: &Rc<defs::Namespace>,
     ) -> Result<(), ParseError> {
@@ -309,10 +308,10 @@ impl Parser {
             number,
             ref_: defs::NamedEventRef::unresolved(ref_.into()),
         });
-        if !ns.insert_event_def(name.into(), defs::EventDef::Copy(event_copy)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_event_def(name.into(), defs::EventDef::Copy(event_copy)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
@@ -338,7 +337,7 @@ impl Parser {
                 if required_start_align.is_some() {
                     return Err(ParseError::InvalidXml);
                 }
-                required_start_align = Some(self.parse_required_start_align(child_node)?);
+                required_start_align = Some(Self::parse_required_start_align(child_node)?);
             } else if let Some(field) = self.try_parse_field_def(child_node)? {
                 fields.push(field);
             } else {
@@ -353,15 +352,14 @@ impl Parser {
             required_start_align,
             fields: RefCell::new(fields),
         });
-        if !ns.insert_error_def(name.into(), defs::ErrorDef::Full(error_full)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_error_def(name.into(), defs::ErrorDef::Full(error_full)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
     fn parse_error_copy_def(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
         ns: &Rc<defs::Namespace>,
     ) -> Result<(), ParseError> {
@@ -377,10 +375,10 @@ impl Parser {
             number,
             ref_: defs::NamedErrorRef::unresolved(ref_.into()),
         });
-        if !ns.insert_error_def(name.into(), defs::ErrorDef::Copy(error_copy)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_error_def(name.into(), defs::ErrorDef::Copy(error_copy)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
@@ -414,10 +412,10 @@ impl Parser {
             fields: RefCell::new(fields),
             external_params: RefCell::new(Vec::new()),
         });
-        if !ns.insert_type_def(name.into(), defs::TypeDef::Struct(struct_)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_type_def(name.into(), defs::TypeDef::Struct(struct_)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
@@ -450,15 +448,14 @@ impl Parser {
             alignment: OnceCell::new(),
             fields,
         });
-        if !ns.insert_type_def(name.into(), defs::TypeDef::Union(union)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_type_def(name.into(), defs::TypeDef::Union(union)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
     fn parse_event_struct_def(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
         ns: &Rc<defs::Namespace>,
     ) -> Result<(), ParseError> {
@@ -474,7 +471,7 @@ impl Parser {
             }
 
             if child_node.has_tag_name("allowed") {
-                alloweds.push(self.parse_event_struct_allowed(child_node)?);
+                alloweds.push(Self::parse_event_struct_allowed(child_node)?);
             } else {
                 return Err(ParseError::InvalidXml);
             }
@@ -485,15 +482,14 @@ impl Parser {
             name: name.into(),
             alloweds,
         });
-        if !ns.insert_type_def(name.into(), defs::TypeDef::EventStruct(event_struct)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_type_def(name.into(), defs::TypeDef::EventStruct(event_struct)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
     fn parse_event_struct_allowed(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
     ) -> Result<defs::EventStructAllowed, ParseError> {
         assert!(node.is_element());
@@ -513,7 +509,6 @@ impl Parser {
     }
 
     fn parse_xid_type_def(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
         ns: &Rc<defs::Namespace>,
     ) -> Result<(), ParseError> {
@@ -525,15 +520,14 @@ impl Parser {
             namespace: Rc::downgrade(ns),
             name: name.into(),
         });
-        if !ns.insert_type_def(name.into(), defs::TypeDef::Xid(xid_type)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_type_def(name.into(), defs::TypeDef::Xid(xid_type)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
     fn parse_xid_union_def(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
         ns: &Rc<defs::Namespace>,
     ) -> Result<(), ParseError> {
@@ -560,15 +554,14 @@ impl Parser {
             name: name.into(),
             types,
         });
-        if !ns.insert_type_def(name.into(), defs::TypeDef::XidUnion(xid_union)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_type_def(name.into(), defs::TypeDef::XidUnion(xid_union)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
     fn parse_enum_def(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
         ns: &Rc<defs::Namespace>,
     ) -> Result<(), ParseError> {
@@ -584,12 +577,12 @@ impl Parser {
             }
 
             if child_node.has_tag_name("item") {
-                items.push(self.parse_enum_item(child_node)?);
+                items.push(Self::parse_enum_item(child_node)?);
             } else if child_node.has_tag_name("doc") {
                 if doc.is_some() {
                     return Err(ParseError::InvalidXml);
                 }
-                doc = Some(self.parse_doc(child_node)?);
+                doc = Some(Self::parse_doc(child_node)?);
             } else {
                 return Err(ParseError::InvalidXml);
             }
@@ -601,17 +594,14 @@ impl Parser {
             items,
             doc,
         });
-        if !ns.insert_type_def(name.into(), defs::TypeDef::Enum(enum_)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_type_def(name.into(), defs::TypeDef::Enum(enum_)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
-    fn parse_enum_item(
-        &mut self,
-        node: roxmltree::Node<'_, '_>,
-    ) -> Result<defs::EnumItem, ParseError> {
+    fn parse_enum_item(node: roxmltree::Node<'_, '_>) -> Result<defs::EnumItem, ParseError> {
         assert!(node.is_element());
 
         let name = get_attr(node, "name")?;
@@ -652,7 +642,6 @@ impl Parser {
     }
 
     fn parse_type_alias_def(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
         ns: &Rc<defs::Namespace>,
     ) -> Result<(), ParseError> {
@@ -667,10 +656,10 @@ impl Parser {
             old_name,
             new_name: new_name.into(),
         });
-        if !ns.insert_type_def(new_name.into(), defs::TypeDef::Alias(type_alias)) {
-            Err(ParseError::RepeatedTypeName)
-        } else {
+        if ns.insert_type_def(new_name.into(), defs::TypeDef::Alias(type_alias)) {
             Ok(())
+        } else {
+            Err(ParseError::RepeatedTypeName)
         }
     }
 
@@ -707,7 +696,7 @@ impl Parser {
             }
             "field" => {
                 let name = get_attr(node, "name")?;
-                let type_ = self.parse_field_value_type(node)?;
+                let type_ = Self::parse_field_value_type(node)?;
 
                 Ok(Some(defs::FieldDef::Normal(defs::NormalField {
                     name: name.into(),
@@ -716,7 +705,7 @@ impl Parser {
             }
             "list" => {
                 let name = get_attr(node, "name")?;
-                let element_type = self.parse_field_value_type(node)?;
+                let element_type = Self::parse_field_value_type(node)?;
                 let length_expr = node
                     .first_element_child()
                     .map(|expr_node| self.parse_expression(expr_node))
@@ -757,7 +746,7 @@ impl Parser {
                         if required_start_align.is_some() {
                             return Err(ParseError::InvalidXml);
                         }
-                        required_start_align = Some(self.parse_required_start_align(child_node)?);
+                        required_start_align = Some(Self::parse_required_start_align(child_node)?);
                     } else if child_node.has_tag_name("case") {
                         if kind.is_none() {
                             kind = Some(defs::SwitchKind::Case);
@@ -800,7 +789,7 @@ impl Parser {
             }
             "exprfield" => {
                 let name = get_attr(node, "name")?;
-                let type_ = self.parse_field_value_type(node)?;
+                let type_ = Self::parse_field_value_type(node)?;
                 let expr = self
                     .parse_expression(node.first_element_child().ok_or(ParseError::InvalidXml)?)?;
 
@@ -815,7 +804,6 @@ impl Parser {
     }
 
     fn parse_required_start_align(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
     ) -> Result<defs::Alignment, ParseError> {
         assert!(node.is_element());
@@ -852,7 +840,7 @@ impl Parser {
                 if required_start_align.is_some() {
                     return Err(ParseError::InvalidXml);
                 }
-                required_start_align = Some(self.parse_required_start_align(child_node)?);
+                required_start_align = Some(Self::parse_required_start_align(child_node)?);
             } else if let Some(field) = self.try_parse_field_def(child_node)? {
                 fields.push(field);
             } else {
@@ -871,7 +859,6 @@ impl Parser {
     }
 
     fn parse_field_value_type(
-        &mut self,
         node: roxmltree::Node<'_, '_>,
     ) -> Result<defs::FieldValueType, ParseError> {
         assert!(node.is_element());
@@ -1047,7 +1034,7 @@ impl Parser {
         Ok(exprs)
     }
 
-    fn parse_doc(&mut self, node: roxmltree::Node<'_, '_>) -> Result<defs::Doc, ParseError> {
+    fn parse_doc(node: roxmltree::Node<'_, '_>) -> Result<defs::Doc, ParseError> {
         assert!(node.is_element());
 
         let mut brief = None;

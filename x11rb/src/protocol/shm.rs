@@ -6,305 +6,498 @@
 #![allow(clippy::too_many_arguments)]
 
 #[allow(unused_imports)]
+use super::xproto;
+use crate::errors::ParseError;
+#[allow(unused_imports)]
+use crate::utils::{pretty_print_bitmask, pretty_print_enum};
+#[allow(unused_imports)]
+use crate::x11_utils::TryIntoUSize;
+#[allow(unused_imports)]
+use crate::x11_utils::{RequestHeader, Serialize, TryParse, TryParseFd};
+#[allow(unused_imports)]
+use core::convert::TryFrom;
+#[allow(unused_imports)]
 use std::borrow::Cow;
 #[allow(unused_imports)]
 use std::convert::TryInto;
-#[allow(unused_imports)]
-use crate::utils::RawFdContainer;
-#[allow(unused_imports)]
-use crate::x11_utils::{Request, RequestHeader, Serialize, TryParse, TryParseFd};
-use std::io::IoSlice;
-use crate::connection::RequestConnection;
-#[allow(unused_imports)]
-use crate::connection::Connection as X11Connection;
-#[allow(unused_imports)]
-use crate::cookie::{Cookie, CookieWithFds, VoidCookie};
-use crate::errors::ConnectionError;
-#[allow(unused_imports)]
-use crate::errors::ReplyOrIdError;
-#[allow(unused_imports)]
-use super::xproto;
 
-pub use x11rb_protocol::protocol::shm::*;
+/// The X11 name of the extension for QueryExtension
+pub const X11_EXTENSION_NAME: &str = "MIT-SHM";
 
-/// Get the major opcode of this extension
-fn major_opcode<Conn: RequestConnection + ?Sized>(conn: &Conn) -> Result<u8, ConnectionError> {
-    let info = conn.extension_information(X11_EXTENSION_NAME)?;
-    let info = info.ok_or(ConnectionError::UnsupportedExtension)?;
-    Ok(info.major_opcode)
-}
-
-pub fn query_version<Conn>(conn: &Conn) -> Result<Cookie<'_, Conn, QueryVersionReply>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = QueryVersionRequest;
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_with_reply(&slices, fds)
-}
-
-pub fn attach<Conn>(conn: &Conn, shmseg: Seg, shmid: u32, read_only: bool) -> Result<VoidCookie<'_, Conn>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = AttachRequest {
-        shmseg,
-        shmid,
-        read_only,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_without_reply(&slices, fds)
-}
-
-pub fn detach<Conn>(conn: &Conn, shmseg: Seg) -> Result<VoidCookie<'_, Conn>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = DetachRequest {
-        shmseg,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_without_reply(&slices, fds)
-}
-
-pub fn put_image<Conn>(conn: &Conn, drawable: xproto::Drawable, gc: xproto::Gcontext, total_width: u16, total_height: u16, src_x: u16, src_y: u16, src_width: u16, src_height: u16, dst_x: i16, dst_y: i16, depth: u8, format: u8, send_event: bool, shmseg: Seg, offset: u32) -> Result<VoidCookie<'_, Conn>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = PutImageRequest {
-        drawable,
-        gc,
-        total_width,
-        total_height,
-        src_x,
-        src_y,
-        src_width,
-        src_height,
-        dst_x,
-        dst_y,
-        depth,
-        format,
-        send_event,
-        shmseg,
-        offset,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_without_reply(&slices, fds)
-}
-
-pub fn get_image<Conn>(conn: &Conn, drawable: xproto::Drawable, x: i16, y: i16, width: u16, height: u16, plane_mask: u32, format: u8, shmseg: Seg, offset: u32) -> Result<Cookie<'_, Conn, GetImageReply>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = GetImageRequest {
-        drawable,
-        x,
-        y,
-        width,
-        height,
-        plane_mask,
-        format,
-        shmseg,
-        offset,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_with_reply(&slices, fds)
-}
-
-pub fn create_pixmap<Conn>(conn: &Conn, pid: xproto::Pixmap, drawable: xproto::Drawable, width: u16, height: u16, depth: u8, shmseg: Seg, offset: u32) -> Result<VoidCookie<'_, Conn>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = CreatePixmapRequest {
-        pid,
-        drawable,
-        width,
-        height,
-        depth,
-        shmseg,
-        offset,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_without_reply(&slices, fds)
-}
-
-pub fn attach_fd<Conn, A>(conn: &Conn, shmseg: Seg, shm_fd: A, read_only: bool) -> Result<VoidCookie<'_, Conn>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-    A: Into<RawFdContainer>,
-{
-    let shm_fd: RawFdContainer = shm_fd.into();
-    let request0 = AttachFdRequest {
-        shmseg,
-        shm_fd,
-        read_only,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_without_reply(&slices, fds)
-}
-
-pub fn create_segment<Conn>(conn: &Conn, shmseg: Seg, size: u32, read_only: bool) -> Result<CookieWithFds<'_, Conn, CreateSegmentReply>, ConnectionError>
-where
-    Conn: RequestConnection + ?Sized,
-{
-    let request0 = CreateSegmentRequest {
-        shmseg,
-        size,
-        read_only,
-    };
-    let (bytes, fds) = request0.serialize(major_opcode(conn)?);
-    let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();
-    conn.send_request_with_reply_with_fds(&slices, fds)
-}
-
-/// Extension trait defining the requests of this extension.
-pub trait ConnectionExt: RequestConnection {
-    fn shm_query_version(&self) -> Result<Cookie<'_, Self, QueryVersionReply>, ConnectionError>
-    {
-        query_version(self)
-    }
-    fn shm_attach(&self, shmseg: Seg, shmid: u32, read_only: bool) -> Result<VoidCookie<'_, Self>, ConnectionError>
-    {
-        attach(self, shmseg, shmid, read_only)
-    }
-    fn shm_detach(&self, shmseg: Seg) -> Result<VoidCookie<'_, Self>, ConnectionError>
-    {
-        detach(self, shmseg)
-    }
-    fn shm_put_image(&self, drawable: xproto::Drawable, gc: xproto::Gcontext, total_width: u16, total_height: u16, src_x: u16, src_y: u16, src_width: u16, src_height: u16, dst_x: i16, dst_y: i16, depth: u8, format: u8, send_event: bool, shmseg: Seg, offset: u32) -> Result<VoidCookie<'_, Self>, ConnectionError>
-    {
-        put_image(self, drawable, gc, total_width, total_height, src_x, src_y, src_width, src_height, dst_x, dst_y, depth, format, send_event, shmseg, offset)
-    }
-    fn shm_get_image(&self, drawable: xproto::Drawable, x: i16, y: i16, width: u16, height: u16, plane_mask: u32, format: u8, shmseg: Seg, offset: u32) -> Result<Cookie<'_, Self, GetImageReply>, ConnectionError>
-    {
-        get_image(self, drawable, x, y, width, height, plane_mask, format, shmseg, offset)
-    }
-    fn shm_create_pixmap(&self, pid: xproto::Pixmap, drawable: xproto::Drawable, width: u16, height: u16, depth: u8, shmseg: Seg, offset: u32) -> Result<VoidCookie<'_, Self>, ConnectionError>
-    {
-        create_pixmap(self, pid, drawable, width, height, depth, shmseg, offset)
-    }
-    fn shm_attach_fd<A>(&self, shmseg: Seg, shm_fd: A, read_only: bool) -> Result<VoidCookie<'_, Self>, ConnectionError>
-    where
-        A: Into<RawFdContainer>,
-    {
-        attach_fd(self, shmseg, shm_fd, read_only)
-    }
-    fn shm_create_segment(&self, shmseg: Seg, size: u32, read_only: bool) -> Result<CookieWithFds<'_, Self, CreateSegmentReply>, ConnectionError>
-    {
-        create_segment(self, shmseg, size, read_only)
-    }
-}
-
-impl<C: RequestConnection + ?Sized> ConnectionExt for C {}
-
-/// A RAII-like wrapper around a [Seg].
+/// The version number of this extension that this client library supports.
 ///
-/// Instances of this struct represent a Seg that is freed in `Drop`.
-///
-/// Any errors during `Drop` are silently ignored. Most likely an error here means that your
-/// X11 connection is broken and later requests will also fail.
-#[derive(Debug)]
-pub struct SegWrapper<'c, C: RequestConnection>(&'c C, Seg);
+/// This constant contains the version number of this extension that is supported
+/// by this build of x11rb. For most things, it does not make sense to use this
+/// information. If you need to send a `QueryVersion`, it is recommended to instead
+/// send the maximum version of the extension that you need.
+pub const X11_XML_VERSION: (u32, u32) = (1, 2);
 
-impl<'c, C: RequestConnection> SegWrapper<'c, C>
-{
-    /// Assume ownership of the given resource and destroy it in `Drop`.
-    pub fn for_seg(conn: &'c C, id: Seg) -> Self {
-        SegWrapper(conn, id)
+pub type Seg = u32;
+
+/// Opcode for the Completion event
+pub const COMPLETION_EVENT: u8 = 0;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CompletionEvent {
+    pub response_type: u8,
+    pub sequence: u16,
+    pub drawable: xproto::Drawable,
+    pub minor_event: u16,
+    pub major_event: u8,
+    pub shmseg: Seg,
+    pub offset: u32,
+}
+impl TryParse for CompletionEvent {
+    fn try_parse(initial_value: &[u8]) -> Result<(Self, &[u8]), ParseError> {
+        let remaining = initial_value;
+        let (response_type, remaining) = u8::try_parse(remaining)?;
+        let remaining = remaining.get(1..).ok_or(ParseError::InsufficientData)?;
+        let (sequence, remaining) = u16::try_parse(remaining)?;
+        let (drawable, remaining) = xproto::Drawable::try_parse(remaining)?;
+        let (minor_event, remaining) = u16::try_parse(remaining)?;
+        let (major_event, remaining) = u8::try_parse(remaining)?;
+        let remaining = remaining.get(1..).ok_or(ParseError::InsufficientData)?;
+        let (shmseg, remaining) = Seg::try_parse(remaining)?;
+        let (offset, remaining) = u32::try_parse(remaining)?;
+        let result = CompletionEvent {
+            response_type,
+            sequence,
+            drawable,
+            minor_event,
+            major_event,
+            shmseg,
+            offset,
+        };
+        let _ = remaining;
+        let remaining = initial_value
+            .get(32..)
+            .ok_or(ParseError::InsufficientData)?;
+        Ok((result, remaining))
     }
-
-    /// Get the XID of the wrapped resource
-    pub fn seg(&self) -> Seg {
-        self.1
+}
+impl From<&CompletionEvent> for [u8; 32] {
+    fn from(input: &CompletionEvent) -> Self {
+        let response_type_bytes = input.response_type.serialize();
+        let sequence_bytes = input.sequence.serialize();
+        let drawable_bytes = input.drawable.serialize();
+        let minor_event_bytes = input.minor_event.serialize();
+        let major_event_bytes = input.major_event.serialize();
+        let shmseg_bytes = input.shmseg.serialize();
+        let offset_bytes = input.offset.serialize();
+        [
+            response_type_bytes[0],
+            0,
+            sequence_bytes[0],
+            sequence_bytes[1],
+            drawable_bytes[0],
+            drawable_bytes[1],
+            drawable_bytes[2],
+            drawable_bytes[3],
+            minor_event_bytes[0],
+            minor_event_bytes[1],
+            major_event_bytes[0],
+            0,
+            shmseg_bytes[0],
+            shmseg_bytes[1],
+            shmseg_bytes[2],
+            shmseg_bytes[3],
+            offset_bytes[0],
+            offset_bytes[1],
+            offset_bytes[2],
+            offset_bytes[3],
+            // trailing padding
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
     }
-
-    /// Assume ownership of the XID of the wrapped resource
-    ///
-    /// This function destroys this wrapper without freeing the underlying resource.
-    pub fn into_seg(self) -> Seg {
-        let id = self.1;
-        std::mem::forget(self);
-        id
+}
+impl From<CompletionEvent> for [u8; 32] {
+    fn from(input: CompletionEvent) -> Self {
+        Self::from(&input)
     }
 }
 
-impl<'c, C: X11Connection> SegWrapper<'c, C>
-{
+/// Opcode for the BadSeg error
+pub const BAD_SEG_ERROR: u8 = 0;
 
-    /// Create a new Seg and return a Seg wrapper and a cookie.
-    ///
-    /// This is a thin wrapper around [attach] that allocates an id for the Seg.
-    /// This function returns the resulting `SegWrapper` that owns the created Seg and frees
-    /// it in `Drop`. This also returns a `VoidCookie` that comes from the call to
-    /// [attach].
-    ///
-    /// Errors can come from the call to [X11Connection::generate_id] or [attach].
-    pub fn attach_and_get_cookie(conn: &'c C, shmid: u32, read_only: bool) -> Result<(Self, VoidCookie<'c, C>), ReplyOrIdError>
-    {
-        let shmseg = conn.generate_id()?;
-        let cookie = attach(conn, shmseg, shmid, read_only)?;
-        Ok((Self::for_seg(conn, shmseg), cookie))
-    }
-
-    /// Create a new Seg and return a Seg wrapper
-    ///
-    /// This is a thin wrapper around [attach] that allocates an id for the Seg.
-    /// This function returns the resulting `SegWrapper` that owns the created Seg and frees
-    /// it in `Drop`.
-    ///
-    /// Errors can come from the call to [X11Connection::generate_id] or [attach].
-    pub fn attach(conn: &'c C, shmid: u32, read_only: bool) -> Result<Self, ReplyOrIdError>
-    {
-        Ok(Self::attach_and_get_cookie(conn, shmid, read_only)?.0)
-    }
-
-    /// Create a new Seg and return a Seg wrapper and a cookie.
-    ///
-    /// This is a thin wrapper around [attach_fd] that allocates an id for the Seg.
-    /// This function returns the resulting `SegWrapper` that owns the created Seg and frees
-    /// it in `Drop`. This also returns a `VoidCookie` that comes from the call to
-    /// [attach_fd].
-    ///
-    /// Errors can come from the call to [X11Connection::generate_id] or [attach_fd].
-    pub fn attach_fd_and_get_cookie<A>(conn: &'c C, shm_fd: A, read_only: bool) -> Result<(Self, VoidCookie<'c, C>), ReplyOrIdError>
-    where
-        A: Into<RawFdContainer>,
-    {
-        let shmseg = conn.generate_id()?;
-        let cookie = attach_fd(conn, shmseg, shm_fd, read_only)?;
-        Ok((Self::for_seg(conn, shmseg), cookie))
-    }
-
-    /// Create a new Seg and return a Seg wrapper
-    ///
-    /// This is a thin wrapper around [attach_fd] that allocates an id for the Seg.
-    /// This function returns the resulting `SegWrapper` that owns the created Seg and frees
-    /// it in `Drop`.
-    ///
-    /// Errors can come from the call to [X11Connection::generate_id] or [attach_fd].
-    pub fn attach_fd<A>(conn: &'c C, shm_fd: A, read_only: bool) -> Result<Self, ReplyOrIdError>
-    where
-        A: Into<RawFdContainer>,
-    {
-        Ok(Self::attach_fd_and_get_cookie(conn, shm_fd, read_only)?.0)
+/// Opcode for the QueryVersion request
+pub const QUERY_VERSION_REQUEST: u8 = 0;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryVersionRequest;
+impl QueryVersionRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let mut request0 = [major_opcode, QUERY_VERSION_REQUEST, 0, 0];
+        request0[2..4].copy_from_slice(&(1u16).to_ne_bytes());
+        request0
     }
 }
 
-impl<C: RequestConnection> From<&SegWrapper<'_, C>> for Seg {
-    fn from(from: &SegWrapper<'_, C>) -> Self {
-        from.1
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct QueryVersionReply {
+    pub shared_pixmaps: bool,
+    pub sequence: u16,
+    pub length: u32,
+    pub major_version: u16,
+    pub minor_version: u16,
+    pub uid: u16,
+    pub gid: u16,
+    pub pixmap_format: u8,
+}
+impl TryParse for QueryVersionReply {
+    fn try_parse(initial_value: &[u8]) -> Result<(Self, &[u8]), ParseError> {
+        let remaining = initial_value;
+        let (response_type, remaining) = u8::try_parse(remaining)?;
+        let (shared_pixmaps, remaining) = bool::try_parse(remaining)?;
+        let (sequence, remaining) = u16::try_parse(remaining)?;
+        let (length, remaining) = u32::try_parse(remaining)?;
+        let (major_version, remaining) = u16::try_parse(remaining)?;
+        let (minor_version, remaining) = u16::try_parse(remaining)?;
+        let (uid, remaining) = u16::try_parse(remaining)?;
+        let (gid, remaining) = u16::try_parse(remaining)?;
+        let (pixmap_format, remaining) = u8::try_parse(remaining)?;
+        let remaining = remaining.get(15..).ok_or(ParseError::InsufficientData)?;
+        if response_type != 1 {
+            return Err(ParseError::InvalidValue);
+        }
+        let result = QueryVersionReply {
+            shared_pixmaps,
+            sequence,
+            length,
+            major_version,
+            minor_version,
+            uid,
+            gid,
+            pixmap_format,
+        };
+        let _ = remaining;
+        let remaining = initial_value
+            .get(32 + length as usize * 4..)
+            .ok_or(ParseError::InsufficientData)?;
+        Ok((result, remaining))
     }
 }
 
-impl<C: RequestConnection> Drop for SegWrapper<'_, C> {
-    fn drop(&mut self) {
-        let _ = detach(self.0, self.1);
+/// Opcode for the Attach request
+pub const ATTACH_REQUEST: u8 = 1;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AttachRequest {
+    pub shmseg: Seg,
+    pub shmid: u32,
+    pub read_only: bool,
+}
+impl AttachRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let shmseg_bytes = self.shmseg.serialize();
+        let shmid_bytes = self.shmid.serialize();
+        let read_only_bytes = self.read_only.serialize();
+        let mut request0 = [
+            major_opcode,
+            ATTACH_REQUEST,
+            0,
+            0,
+            shmseg_bytes[0],
+            shmseg_bytes[1],
+            shmseg_bytes[2],
+            shmseg_bytes[3],
+            shmid_bytes[0],
+            shmid_bytes[1],
+            shmid_bytes[2],
+            shmid_bytes[3],
+            read_only_bytes[0],
+            0,
+            0,
+            0,
+        ];
+        request0[2..4].copy_from_slice(&(4u16).to_ne_bytes());
+        request0
     }
 }
+
+/// Opcode for the Detach request
+pub const DETACH_REQUEST: u8 = 2;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DetachRequest {
+    pub shmseg: Seg,
+}
+impl DetachRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let shmseg_bytes = self.shmseg.serialize();
+        let mut request0 = [
+            major_opcode,
+            DETACH_REQUEST,
+            0,
+            0,
+            shmseg_bytes[0],
+            shmseg_bytes[1],
+            shmseg_bytes[2],
+            shmseg_bytes[3],
+        ];
+        request0[2..4].copy_from_slice(&(2u16).to_ne_bytes());
+        request0
+    }
+}
+
+/// Opcode for the PutImage request
+pub const PUT_IMAGE_REQUEST: u8 = 3;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PutImageRequest {
+    pub drawable: xproto::Drawable,
+    pub gc: xproto::Gcontext,
+    pub total_width: u16,
+    pub total_height: u16,
+    pub src_x: u16,
+    pub src_y: u16,
+    pub src_width: u16,
+    pub src_height: u16,
+    pub dst_x: i16,
+    pub dst_y: i16,
+    pub depth: u8,
+    pub format: u8,
+    pub send_event: bool,
+    pub shmseg: Seg,
+    pub offset: u32,
+}
+impl PutImageRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let drawable_bytes = self.drawable.serialize();
+        let gc_bytes = self.gc.serialize();
+        let total_width_bytes = self.total_width.serialize();
+        let total_height_bytes = self.total_height.serialize();
+        let src_x_bytes = self.src_x.serialize();
+        let src_y_bytes = self.src_y.serialize();
+        let src_width_bytes = self.src_width.serialize();
+        let src_height_bytes = self.src_height.serialize();
+        let dst_x_bytes = self.dst_x.serialize();
+        let dst_y_bytes = self.dst_y.serialize();
+        let depth_bytes = self.depth.serialize();
+        let format_bytes = self.format.serialize();
+        let send_event_bytes = self.send_event.serialize();
+        let shmseg_bytes = self.shmseg.serialize();
+        let offset_bytes = self.offset.serialize();
+        let mut request0 = [
+            major_opcode,
+            PUT_IMAGE_REQUEST,
+            0,
+            0,
+            drawable_bytes[0],
+            drawable_bytes[1],
+            drawable_bytes[2],
+            drawable_bytes[3],
+            gc_bytes[0],
+            gc_bytes[1],
+            gc_bytes[2],
+            gc_bytes[3],
+            total_width_bytes[0],
+            total_width_bytes[1],
+            total_height_bytes[0],
+            total_height_bytes[1],
+            src_x_bytes[0],
+            src_x_bytes[1],
+            src_y_bytes[0],
+            src_y_bytes[1],
+            src_width_bytes[0],
+            src_width_bytes[1],
+            src_height_bytes[0],
+            src_height_bytes[1],
+            dst_x_bytes[0],
+            dst_x_bytes[1],
+            dst_y_bytes[0],
+            dst_y_bytes[1],
+            depth_bytes[0],
+            format_bytes[0],
+            send_event_bytes[0],
+            0,
+            shmseg_bytes[0],
+            shmseg_bytes[1],
+            shmseg_bytes[2],
+            shmseg_bytes[3],
+            offset_bytes[0],
+            offset_bytes[1],
+            offset_bytes[2],
+            offset_bytes[3],
+        ];
+        request0[2..4].copy_from_slice(&(10u16).to_ne_bytes());
+        request0
+    }
+}
+
+/// Opcode for the GetImage request
+pub const GET_IMAGE_REQUEST: u8 = 4;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GetImageRequest {
+    pub drawable: xproto::Drawable,
+    pub x: i16,
+    pub y: i16,
+    pub width: u16,
+    pub height: u16,
+    pub plane_mask: u32,
+    pub format: u8,
+    pub shmseg: Seg,
+    pub offset: u32,
+}
+impl GetImageRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let drawable_bytes = self.drawable.serialize();
+        let x_bytes = self.x.serialize();
+        let y_bytes = self.y.serialize();
+        let width_bytes = self.width.serialize();
+        let height_bytes = self.height.serialize();
+        let plane_mask_bytes = self.plane_mask.serialize();
+        let format_bytes = self.format.serialize();
+        let shmseg_bytes = self.shmseg.serialize();
+        let offset_bytes = self.offset.serialize();
+        let mut request0 = [
+            major_opcode,
+            GET_IMAGE_REQUEST,
+            0,
+            0,
+            drawable_bytes[0],
+            drawable_bytes[1],
+            drawable_bytes[2],
+            drawable_bytes[3],
+            x_bytes[0],
+            x_bytes[1],
+            y_bytes[0],
+            y_bytes[1],
+            width_bytes[0],
+            width_bytes[1],
+            height_bytes[0],
+            height_bytes[1],
+            plane_mask_bytes[0],
+            plane_mask_bytes[1],
+            plane_mask_bytes[2],
+            plane_mask_bytes[3],
+            format_bytes[0],
+            0,
+            0,
+            0,
+            shmseg_bytes[0],
+            shmseg_bytes[1],
+            shmseg_bytes[2],
+            shmseg_bytes[3],
+            offset_bytes[0],
+            offset_bytes[1],
+            offset_bytes[2],
+            offset_bytes[3],
+        ];
+        request0[2..4].copy_from_slice(&(8u16).to_ne_bytes());
+        request0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GetImageReply {
+    pub depth: u8,
+    pub sequence: u16,
+    pub length: u32,
+    pub visual: xproto::Visualid,
+    pub size: u32,
+}
+impl TryParse for GetImageReply {
+    fn try_parse(initial_value: &[u8]) -> Result<(Self, &[u8]), ParseError> {
+        let remaining = initial_value;
+        let (response_type, remaining) = u8::try_parse(remaining)?;
+        let (depth, remaining) = u8::try_parse(remaining)?;
+        let (sequence, remaining) = u16::try_parse(remaining)?;
+        let (length, remaining) = u32::try_parse(remaining)?;
+        let (visual, remaining) = xproto::Visualid::try_parse(remaining)?;
+        let (size, remaining) = u32::try_parse(remaining)?;
+        if response_type != 1 {
+            return Err(ParseError::InvalidValue);
+        }
+        let result = GetImageReply {
+            depth,
+            sequence,
+            length,
+            visual,
+            size,
+        };
+        let _ = remaining;
+        let remaining = initial_value
+            .get(32 + length as usize * 4..)
+            .ok_or(ParseError::InsufficientData)?;
+        Ok((result, remaining))
+    }
+}
+
+/// Opcode for the CreatePixmap request
+pub const CREATE_PIXMAP_REQUEST: u8 = 5;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CreatePixmapRequest {
+    pub pid: xproto::Pixmap,
+    pub drawable: xproto::Drawable,
+    pub width: u16,
+    pub height: u16,
+    pub depth: u8,
+    pub shmseg: Seg,
+    pub offset: u32,
+}
+impl CreatePixmapRequest {
+    /// Serialize this request into bytes for the provided connection
+    #[must_use]
+    pub fn serialize(self, major_opcode: u8) -> impl AsRef<[u8]> {
+        let pid_bytes = self.pid.serialize();
+        let drawable_bytes = self.drawable.serialize();
+        let width_bytes = self.width.serialize();
+        let height_bytes = self.height.serialize();
+        let depth_bytes = self.depth.serialize();
+        let shmseg_bytes = self.shmseg.serialize();
+        let offset_bytes = self.offset.serialize();
+        let mut request0 = [
+            major_opcode,
+            CREATE_PIXMAP_REQUEST,
+            0,
+            0,
+            pid_bytes[0],
+            pid_bytes[1],
+            pid_bytes[2],
+            pid_bytes[3],
+            drawable_bytes[0],
+            drawable_bytes[1],
+            drawable_bytes[2],
+            drawable_bytes[3],
+            width_bytes[0],
+            width_bytes[1],
+            height_bytes[0],
+            height_bytes[1],
+            depth_bytes[0],
+            0,
+            0,
+            0,
+            shmseg_bytes[0],
+            shmseg_bytes[1],
+            shmseg_bytes[2],
+            shmseg_bytes[3],
+            offset_bytes[0],
+            offset_bytes[1],
+            offset_bytes[2],
+            offset_bytes[3],
+        ];
+        request0[2..4].copy_from_slice(&(7u16).to_ne_bytes());
+        request0
+    }
+}
+
+/// Opcode for the AttachFd request
+pub const ATTACH_FD_REQUEST: u8 = 6;
+/// Opcode for the CreateSegment request
+pub const CREATE_SEGMENT_REQUEST: u8 = 7;

@@ -121,12 +121,11 @@ impl NormalFieldRefResolveScope<'_, '_, '_> {
                             ref_kind: defs::FieldRefKind::LocalField,
                             field_type: field_type.type_.get_resolved().clone(),
                         });
-                    } else {
-                        break 'outer Some(defs::ResolvedFieldRef {
-                            ref_kind: defs::FieldRefKind::ExtParam,
-                            field_type: field_type.type_.get_resolved().clone(),
-                        });
                     }
+                    break 'outer Some(defs::ResolvedFieldRef {
+                        ref_kind: defs::FieldRefKind::ExtParam,
+                        field_type: field_type.type_.get_resolved().clone(),
+                    });
                 }
             }
             if let Some(parent_scope) = current_scope.parent {
@@ -178,13 +177,13 @@ impl ExternalParamGatherer {
     }
 
     fn add(&mut self, name: &str, type_: &defs::TypeRef) -> Result<(), ResolveError> {
-        for ext_param in self.vec.iter() {
+        for ext_param in &self.vec {
             if ext_param.name == *name {
-                if !ext_param.type_.same_as(type_) {
-                    return Err(ResolveError::DiscrepantParamRefTypes(name.into()));
+                return if ext_param.type_.same_as(type_) {
+                    Ok(())
                 } else {
-                    return Ok(());
-                }
+                    Err(ResolveError::DiscrepantParamRefTypes(name.into()))
+                };
             }
         }
         self.vec.push(defs::ExternalParam {
@@ -259,7 +258,6 @@ fn resolve_field_refs_in_field(
     scope: &FieldRefResolveScope<'_, '_, '_>,
 ) -> Result<(), ResolveError> {
     match field {
-        defs::FieldDef::Pad(_) => Ok(()),
         defs::FieldDef::Normal(normal_field) => {
             resolve_field_refs_in_type(normal_field.type_.type_.get_resolved(), scope)?;
             Ok(())
@@ -280,9 +278,9 @@ fn resolve_field_refs_in_field(
                 ext_param_gatherer: &switch_ext_fields_gatherer,
             });
             resolve_field_refs_in_expr(&switch_field.expr, &switch_scope)?;
-            for switch_case in switch_field.cases.iter() {
+            for switch_case in &switch_field.cases {
                 let case_ext_fields_gatherer = RefCell::new(ExternalParamGatherer::new());
-                for case_expr in switch_case.exprs.iter() {
+                for case_expr in &switch_case.exprs {
                     resolve_field_refs_in_expr(
                         case_expr,
                         &FieldRefResolveScope::Normal(NormalFieldRefResolveScope {
@@ -307,7 +305,7 @@ fn resolve_field_refs_in_field(
                 .replace(switch_ext_fields_gatherer.into_inner().vec);
             Ok(())
         }
-        defs::FieldDef::Fd(_) => Ok(()),
+        defs::FieldDef::Fd(_) | defs::FieldDef::Pad(_) | defs::FieldDef::VirtualLen(_) => Ok(()),
         defs::FieldDef::FdList(fd_list_field) => {
             resolve_field_refs_in_expr(&fd_list_field.length_expr, scope)?;
             Ok(())
@@ -321,7 +319,6 @@ fn resolve_field_refs_in_field(
             resolve_field_refs_in_expr(&expr_field.expr, &scope2)?;
             Ok(())
         }
-        defs::FieldDef::VirtualLen(_) => Ok(()),
     }
 }
 
@@ -377,7 +374,10 @@ fn resolve_field_refs_in_expr(
             )?;
             Ok(())
         }
-        defs::Expression::EnumRef(_) => Ok(()),
+        defs::Expression::EnumRef(_)
+        | defs::Expression::ListElementRef
+        | defs::Expression::Value(_)
+        | defs::Expression::Bit(_) => Ok(()),
         defs::Expression::PopCount(operand_expr) => {
             resolve_field_refs_in_expr(operand_expr, scope)?;
             Ok(())
@@ -387,28 +387,22 @@ fn resolve_field_refs_in_expr(
             sum_of_expr.resolved_field.set(resolved).unwrap();
 
             let resolved = sum_of_expr.resolved_field.get().unwrap();
-            match resolved.field_type {
-                defs::TypeRef::Struct(ref struct_def) => {
-                    let struct_def = struct_def.upgrade().unwrap();
-                    let struct_fields = struct_def.fields.borrow();
-                    let sum_of_scope = FieldRefResolveScope::SumOf(SumOfFieldRefResolveScope {
-                        parent: scope.as_normal().unwrap(),
-                        struct_fields: &struct_fields,
-                    });
-                    resolve_field_refs_in_expr(&sum_of_expr.operand, &sum_of_scope)?;
-                }
-                _ => {
-                    let sum_of_scope = FieldRefResolveScope::SumOf(SumOfFieldRefResolveScope {
-                        parent: scope.as_normal().unwrap(),
-                        struct_fields: &[],
-                    });
-                    resolve_field_refs_in_expr(&sum_of_expr.operand, &sum_of_scope)?;
-                }
+            if let defs::TypeRef::Struct(ref struct_def) = resolved.field_type {
+                let struct_def = struct_def.upgrade().unwrap();
+                let struct_fields = struct_def.fields.borrow();
+                let sum_of_scope = FieldRefResolveScope::SumOf(SumOfFieldRefResolveScope {
+                    parent: scope.as_normal().unwrap(),
+                    struct_fields: &struct_fields,
+                });
+                resolve_field_refs_in_expr(&sum_of_expr.operand, &sum_of_scope)?;
+            } else {
+                let sum_of_scope = FieldRefResolveScope::SumOf(SumOfFieldRefResolveScope {
+                    parent: scope.as_normal().unwrap(),
+                    struct_fields: &[],
+                });
+                resolve_field_refs_in_expr(&sum_of_expr.operand, &sum_of_scope)?;
             }
             Ok(())
         }
-        defs::Expression::ListElementRef => Ok(()),
-        defs::Expression::Value(_) => Ok(()),
-        defs::Expression::Bit(_) => Ok(()),
     }
 }

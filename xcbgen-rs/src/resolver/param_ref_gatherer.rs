@@ -18,13 +18,13 @@ struct StructParamRefGatherer {
 
 impl StructParamRefGatherer {
     fn add_external_param(&mut self, name: &str, type_: defs::TypeRef) -> Result<(), ResolveError> {
-        for ext_param in self.external_params.iter() {
+        for ext_param in &self.external_params {
             if ext_param.name == name {
-                if !ext_param.type_.same_as(&type_) {
-                    return Err(ResolveError::DiscrepantParamRefTypes(name.into()));
+                return if ext_param.type_.same_as(&type_) {
+                    Ok(())
                 } else {
-                    return Ok(());
-                }
+                    Err(ResolveError::DiscrepantParamRefTypes(name.into()))
+                };
             }
         }
         self.external_params.push(defs::ExternalParam {
@@ -50,8 +50,6 @@ impl StructParamRefGatherer {
 
     fn gather_param_refs_in_field(&mut self, field: &defs::FieldDef) -> Result<(), ResolveError> {
         match field {
-            defs::FieldDef::Pad(_) => Ok(()),
-            defs::FieldDef::Normal(_) => Ok(()),
             defs::FieldDef::List(list_field) => {
                 if let Some(ref length_expr) = list_field.length_expr {
                     self.gather_param_refs_in_expr(length_expr)?;
@@ -60,8 +58,8 @@ impl StructParamRefGatherer {
             }
             defs::FieldDef::Switch(switch_field) => {
                 self.gather_param_refs_in_expr(&switch_field.expr)?;
-                for case in switch_field.cases.iter() {
-                    for case_expr in case.exprs.iter() {
+                for case in &switch_field.cases {
+                    for case_expr in &case.exprs {
                         self.gather_param_refs_in_expr(case_expr)?;
                     }
                     for case_field in case.fields.borrow().iter() {
@@ -70,7 +68,10 @@ impl StructParamRefGatherer {
                 }
                 Ok(())
             }
-            defs::FieldDef::Fd(_) => Ok(()),
+            defs::FieldDef::Fd(_)
+            | defs::FieldDef::Normal(_)
+            | defs::FieldDef::Pad(_)
+            | defs::FieldDef::VirtualLen(_) => Ok(()),
             defs::FieldDef::FdList(fd_list_field) => {
                 self.gather_param_refs_in_expr(&fd_list_field.length_expr)?;
                 Ok(())
@@ -79,7 +80,6 @@ impl StructParamRefGatherer {
                 self.gather_param_refs_in_expr(&expr_field.expr)?;
                 Ok(())
             }
-            defs::FieldDef::VirtualLen(_) => Ok(()),
         }
     }
 
@@ -94,7 +94,11 @@ impl StructParamRefGatherer {
                 self.gather_param_refs_in_expr(&unary_op_expr.rhs)?;
                 Ok(())
             }
-            defs::Expression::FieldRef(_) => Ok(()),
+            defs::Expression::FieldRef(_)
+            | defs::Expression::Value(_)
+            | defs::Expression::EnumRef(_)
+            | defs::Expression::ListElementRef
+            | defs::Expression::Bit(_) => Ok(()),
             defs::Expression::ParamRef(param_ref_expr) => {
                 self.add_external_param(
                     &param_ref_expr.field_name,
@@ -102,7 +106,6 @@ impl StructParamRefGatherer {
                 )?;
                 Ok(())
             }
-            defs::Expression::EnumRef(_) => Ok(()),
             defs::Expression::PopCount(expr) => {
                 self.gather_param_refs_in_expr(expr)?;
                 Ok(())
@@ -111,9 +114,6 @@ impl StructParamRefGatherer {
                 self.gather_param_refs_in_expr(&sum_of_expr.operand)?;
                 Ok(())
             }
-            defs::Expression::ListElementRef => Ok(()),
-            defs::Expression::Value(_) => Ok(()),
-            defs::Expression::Bit(_) => Ok(()),
         }
     }
 }

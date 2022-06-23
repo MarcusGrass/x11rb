@@ -50,7 +50,7 @@ fn run_in_request(request_def: &defs::RequestDef) {
         fields.insert(1, minor_opcode_field);
     } else {
         fields.insert(0, major_opcode_field);
-        if fields.get(1).and_then(|field| field.size()) != Some(1) {
+        if fields.get(1).and_then(defs::FieldDef::size) != Some(1) {
             fields.insert(
                 1,
                 defs::FieldDef::Pad(defs::PadField {
@@ -85,7 +85,7 @@ fn run_in_reply(reply_def: &defs::ReplyDef) {
     });
 
     fields.insert(0, response_type_field);
-    if fields.get(1).and_then(|field| field.size()) != Some(1) {
+    if fields.get(1).and_then(defs::FieldDef::size) != Some(1) {
         fields.insert(
             1,
             defs::FieldDef::Pad(defs::PadField {
@@ -133,7 +133,7 @@ fn run_in_event(event_def: &defs::EventFullDef) {
     } else {
         fields.insert(0, response_type_field);
         if !event_def.no_sequence_number {
-            if fields.get(1).and_then(|field| field.size()) != Some(1) {
+            if fields.get(1).and_then(defs::FieldDef::size) != Some(1) {
                 fields.insert(
                     1,
                     defs::FieldDef::Pad(defs::PadField {
@@ -176,12 +176,11 @@ fn run_in_struct(struct_def: &defs::StructDef) {
     run_in_field_list(&mut struct_def.fields.borrow_mut());
 }
 
+#[allow(clippy::match_on_vec_items)]
 fn run_in_field_list(fields: &mut Vec<defs::FieldDef>) {
     let mut i: usize = 0;
     while i < fields.len() {
         match fields[i] {
-            defs::FieldDef::Pad(_) => {}
-            defs::FieldDef::Normal(_) => {}
             defs::FieldDef::List(ref list_field) => {
                 if list_field.length_expr.is_none() {
                     i += 1;
@@ -198,14 +197,16 @@ fn run_in_field_list(fields: &mut Vec<defs::FieldDef>) {
                 }
             }
             defs::FieldDef::Switch(ref switch_field) => {
-                for switch_case in switch_field.cases.iter() {
+                for switch_case in &switch_field.cases {
                     run_in_field_list(&mut switch_case.fields.borrow_mut());
                 }
             }
-            defs::FieldDef::Fd(_) => {}
-            defs::FieldDef::FdList(_) => {}
-            defs::FieldDef::Expr(_) => {}
-            defs::FieldDef::VirtualLen(_) => {}
+            defs::FieldDef::Fd(_)
+            | defs::FieldDef::FdList(_)
+            | defs::FieldDef::Expr(_)
+            | defs::FieldDef::Normal(_)
+            | defs::FieldDef::Pad(_)
+            | defs::FieldDef::VirtualLen(_) => {}
         }
         i += 1;
     }

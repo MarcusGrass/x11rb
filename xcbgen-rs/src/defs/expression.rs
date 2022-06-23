@@ -50,6 +50,7 @@ pub enum Expression {
 
 impl Expression {
     /// Negate an expression, attempting to be efficient where possible.
+    #[must_use]
     pub fn negate(self: Box<Expression>) -> Box<Expression> {
         match *self {
             Expression::UnaryOp(UnaryOpExpr {

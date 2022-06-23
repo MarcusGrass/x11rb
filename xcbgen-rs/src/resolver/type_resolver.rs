@@ -85,7 +85,7 @@ impl<'a> TypeResolver<'a> {
                 Ok(())
             }
             defs::EventDef::Copy(event_copy_def) => {
-                self.resolve_named_event(&event_copy_def.ref_, ns)?;
+                Self::resolve_named_event(&event_copy_def.ref_, ns)?;
                 Ok(())
             }
         }
@@ -106,7 +106,7 @@ impl<'a> TypeResolver<'a> {
                 Ok(())
             }
             defs::ErrorDef::Copy(error_copy_def) => {
-                self.resolve_named_error(&error_copy_def.ref_, ns)?;
+                Self::resolve_named_error(&error_copy_def.ref_, ns)?;
                 Ok(())
             }
         }
@@ -128,21 +128,21 @@ impl<'a> TypeResolver<'a> {
             }
             defs::TypeDef::Union(union_def) => {
                 Self::check_repeated_fields(&union_def.fields)?;
-                for field in union_def.fields.iter() {
+                for field in &union_def.fields {
                     self.resolve_field(field, ns)?;
                 }
                 Ok(())
             }
             defs::TypeDef::EventStruct(event_struct_def) => {
-                for allowed in event_struct_def.alloweds.iter() {
-                    self.resolve_event_struct_allowed(event_struct_def, allowed)?;
+                for allowed in &event_struct_def.alloweds {
+                    Self::resolve_event_struct_allowed(event_struct_def, allowed)?;
                 }
                 Ok(())
             }
             defs::TypeDef::Xid(_) => Ok(()),
             defs::TypeDef::XidUnion(xid_union_def) => {
-                for type_ in xid_union_def.types.iter() {
-                    self.resolve_named_type(type_, ns, false)?;
+                for type_ in &xid_union_def.types {
+                    Self::resolve_named_type(type_, ns, false)?;
                 }
                 Ok(())
             }
@@ -158,7 +158,7 @@ impl<'a> TypeResolver<'a> {
                 Ok(())
             }
             defs::TypeDef::Alias(type_alias_def) => {
-                self.resolve_named_type(&type_alias_def.old_name, ns, false)?;
+                Self::resolve_named_type(&type_alias_def.old_name, ns, false)?;
                 Ok(())
             }
         }
@@ -184,13 +184,12 @@ impl<'a> TypeResolver<'a> {
         ns: &defs::Namespace,
     ) -> Result<(), ResolveError> {
         match field {
-            defs::FieldDef::Pad(_) => Ok(()),
             defs::FieldDef::Normal(normal_field) => {
-                self.resolve_field_value_type(&normal_field.type_, ns)?;
+                Self::resolve_field_value_type(&normal_field.type_, ns)?;
                 Ok(())
             }
             defs::FieldDef::List(list_field) => {
-                self.resolve_field_value_type(&list_field.element_type, ns)?;
+                Self::resolve_field_value_type(&list_field.element_type, ns)?;
                 if let Some(ref length_expr) = list_field.length_expr {
                     self.resolve_expr(length_expr, ns)?;
                 }
@@ -198,8 +197,8 @@ impl<'a> TypeResolver<'a> {
             }
             defs::FieldDef::Switch(switch_field) => {
                 self.resolve_expr(&switch_field.expr, ns)?;
-                for case in switch_field.cases.iter() {
-                    for case_expr in case.exprs.iter() {
+                for case in &switch_field.cases {
+                    for case_expr in &case.exprs {
                         self.resolve_expr(case_expr, ns)?;
                     }
                     for case_field in case.fields.borrow().iter() {
@@ -208,13 +207,13 @@ impl<'a> TypeResolver<'a> {
                 }
                 Ok(())
             }
-            defs::FieldDef::Fd(_) => Ok(()),
+            defs::FieldDef::Fd(_) | defs::FieldDef::Pad(_) => Ok(()),
             defs::FieldDef::FdList(fd_list_field) => {
                 self.resolve_expr(&fd_list_field.length_expr, ns)?;
                 Ok(())
             }
             defs::FieldDef::Expr(expr_field) => {
-                self.resolve_field_value_type(&expr_field.type_, ns)?;
+                Self::resolve_field_value_type(&expr_field.type_, ns)?;
                 self.resolve_expr(&expr_field.expr, ns)?;
                 Ok(())
             }
@@ -225,34 +224,32 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_field_value_type(
-        &mut self,
         type_: &defs::FieldValueType,
         ns: &defs::Namespace,
     ) -> Result<(), ResolveError> {
-        self.resolve_named_type(&type_.type_, ns, false)?;
+        Self::resolve_named_type(&type_.type_, ns, false)?;
         match type_.value_set {
             defs::FieldValueSet::None => Ok(()),
             defs::FieldValueSet::Enum(ref enum_) => {
-                self.resolve_named_type(enum_, ns, true)?;
+                Self::resolve_named_type(enum_, ns, true)?;
                 Ok(())
             }
             defs::FieldValueSet::AltEnum(ref altenum) => {
-                self.resolve_named_type(altenum, ns, true)?;
+                Self::resolve_named_type(altenum, ns, true)?;
                 Ok(())
             }
             defs::FieldValueSet::Mask(ref mask) => {
-                self.resolve_named_type(mask, ns, true)?;
+                Self::resolve_named_type(mask, ns, true)?;
                 Ok(())
             }
             defs::FieldValueSet::AltMask(ref altmask) => {
-                self.resolve_named_type(altmask, ns, true)?;
+                Self::resolve_named_type(altmask, ns, true)?;
                 Ok(())
             }
         }
     }
 
     fn resolve_event_struct_allowed(
-        &mut self,
         event_struct_def: &defs::EventStructDef,
         allowed: &defs::EventStructAllowed,
     ) -> Result<(), ResolveError> {
@@ -302,13 +299,16 @@ impl<'a> TypeResolver<'a> {
                 self.resolve_expr(&unary_op_expr.rhs, ns)?;
                 Ok(())
             }
-            defs::Expression::FieldRef(_) => Ok(()),
+            defs::Expression::FieldRef(_)
+            | defs::Expression::Bit(_)
+            | defs::Expression::ListElementRef
+            | defs::Expression::Value(_) => Ok(()),
             defs::Expression::ParamRef(param_ref_expr) => {
-                self.resolve_named_type(&param_ref_expr.type_, ns, false)?;
+                Self::resolve_named_type(&param_ref_expr.type_, ns, false)?;
                 Ok(())
             }
             defs::Expression::EnumRef(enum_ref_expr) => {
-                self.resolve_named_type(&enum_ref_expr.enum_, ns, true)?;
+                Self::resolve_named_type(&enum_ref_expr.enum_, ns, true)?;
                 Ok(())
             }
             defs::Expression::PopCount(expr) => {
@@ -319,14 +319,10 @@ impl<'a> TypeResolver<'a> {
                 self.resolve_expr(&sum_of_expr.operand, ns)?;
                 Ok(())
             }
-            defs::Expression::ListElementRef => Ok(()),
-            defs::Expression::Value(_) => Ok(()),
-            defs::Expression::Bit(_) => Ok(()),
         }
     }
 
     fn resolve_named_event(
-        &mut self,
         named_event: &defs::NamedEventRef,
         ns: &defs::Namespace,
     ) -> Result<(), ResolveError> {
@@ -370,7 +366,6 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_named_error(
-        &mut self,
         named_error: &defs::NamedErrorRef,
         ns: &defs::Namespace,
     ) -> Result<(), ResolveError> {
@@ -414,7 +409,6 @@ impl<'a> TypeResolver<'a> {
     }
 
     fn resolve_named_type(
-        &mut self,
         named_type: &defs::NamedTypeRef,
         ns: &defs::Namespace,
         can_be_enum: bool,

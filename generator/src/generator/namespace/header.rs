@@ -29,56 +29,36 @@ pub(super) fn write_header(out: &mut Output, ns: &xcbdefs::Namespace, mode: Mode
         outln!(out, "//! specific errors, events, or requests.");
     }
 
-    let (alloc_name, core_name) = match mode {
-        Mode::Protocol => ("alloc", "core"),
-        Mode::X11rb => ("std", "std"),
-    };
-
     outln!(out, "");
     outln!(out, "#![allow(clippy::too_many_arguments)]");
     outln!(out, "");
-    outln!(out, "#[allow(unused_imports)]");
-    outln!(out, "use {}::borrow::Cow;", alloc_name);
-    outln!(out, "#[allow(unused_imports)]");
-    outln!(out, "use {}::convert::TryInto;", core_name);
     if mode == Mode::Protocol {
-        outln!(out, "use alloc::vec;");
-        outln!(out, "use alloc::vec::Vec;");
+        outln!(out, "#[allow(unused_imports)]");
         outln!(out, "use core::convert::TryFrom;");
         outln!(out, "use crate::errors::ParseError;");
         outln!(out, "#[allow(unused_imports)]");
         outln!(out, "use crate::x11_utils::TryIntoUSize;");
-        outln!(out, "use crate::{{BufWithFds, PiecewiseBuf}};");
     }
     outln!(out, "#[allow(unused_imports)]");
-    match mode {
-        Mode::Protocol => outln!(
+    outln!(out, "use std::borrow::Cow;");
+    if mode == Mode::Protocol {
+        outln!(out, "#[allow(unused_imports)]");
+        outln!(
             out,
-            "use crate::utils::{{RawFdContainer, pretty_print_bitmask, pretty_print_enum}};"
-        ),
-        Mode::X11rb => outln!(out, "use crate::utils::RawFdContainer;"),
+            "use crate::utils::{{pretty_print_bitmask, pretty_print_enum}};"
+        );
     }
     outln!(out, "#[allow(unused_imports)]");
     outln!(
         out,
-        "use crate::x11_utils::{{Request, RequestHeader, Serialize, TryParse, TryParseFd}};"
+        "use crate::x11_utils::{{RequestHeader, Serialize, TryParse, TryParseFd}};"
     );
+    outln!(out, "#[allow(unused_imports)]");
+    outln!(out, "use std::convert::TryInto;");
     if mode == Mode::X11rb {
-        outln!(out, "use std::io::IoSlice;");
-        outln!(out, "use crate::connection::RequestConnection;");
+        outln!(out, "use crate::SocketConnection;");
         outln!(out, "#[allow(unused_imports)]");
-        outln!(out, "use crate::connection::Connection as X11Connection;");
-        outln!(out, "#[allow(unused_imports)]");
-        outln!(
-            out,
-            "use crate::cookie::{{Cookie, CookieWithFds, VoidCookie}};"
-        );
-        if ns.header == "xproto" {
-            outln!(out, "use crate::cookie::ListFontsWithInfoCookie;");
-        }
-        if ns.header == "record" {
-            outln!(out, "use crate::cookie::RecordEnableContextCookie;");
-        }
+        outln!(out, "use crate::cookie::{{VoidCookie, Cookie}};");
         outln!(out, "use crate::errors::ConnectionError;");
         outln!(out, "#[allow(unused_imports)]");
         outln!(out, "use crate::errors::ReplyOrIdError;");
@@ -91,14 +71,14 @@ pub(super) fn write_header(out: &mut Output, ns: &xcbdefs::Namespace, mode: Mode
         .map(|import| import.name.clone())
         .collect::<Vec<_>>();
     imports.sort();
-    for import in imports.iter() {
+    for import in &imports {
         outln!(out, "#[allow(unused_imports)]");
         outln!(out, "use super::{};", import);
     }
 
     if mode == Mode::X11rb {
         outln!(out, "");
-        outln!(out, "pub use x11rb_protocol::protocol::{}::*;", ns.header);
+        outln!(out, "pub use crate::protocol::{}::*;", ns.header);
     }
 
     if let Some(ref ext_info) = ns.ext_info {
@@ -144,11 +124,14 @@ pub(super) fn write_header(out: &mut Output, ns: &xcbdefs::Namespace, mode: Mode
         if mode == Mode::X11rb {
             outln!(out, "");
             outln!(out, "/// Get the major opcode of this extension");
-            outln!(out, "fn major_opcode<Conn: RequestConnection + ?Sized>(conn: &Conn) -> Result<u8, ConnectionError> {{");
+            outln!(
+                out,
+                "fn major_opcode(conn: &SocketConnection) -> Result<u8, ConnectionError> {{"
+            );
             out.indented(|out| {
                 outln!(
                     out,
-                    "let info = conn.extension_information(X11_EXTENSION_NAME)?;",
+                    "let info = conn.extension_information(X11_EXTENSION_NAME);",
                 );
                 outln!(
                     out,

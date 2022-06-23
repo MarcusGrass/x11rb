@@ -1,33 +1,29 @@
 //! X11 resource manager library.
-//!
-//! Usage example (please cache the database returned by [`new_from_default`] in real applications
-//! instead of re-opening it whenever a value is needed):
-//! ```
-//! use x11rb::{connection::Connection, errors::ReplyError, resource_manager::new_from_default};
-//! fn get_xft_dpi(conn: &impl Connection) -> Result<Option<u32>, ReplyError> {
-//!     let db = new_from_default(conn)?;
-//!     let value = db.get_value("Xft.dpi", "");
-//!     Ok(value.ok().flatten())
-//! }
-//! ```
-//!
-//! This functionality is similar to what is available to C code through xcb-util-xrm and Xlib's
-//! `Xrm*` function family. Not all their functionality is available in this library. Please open a
-//! feature request if you need something that is not available.
-//!
 //! The code in this module is only available when the `resource_manager` feature of the library is
 //! enabled.
 
-use crate::connection::Connection;
 use crate::errors::ReplyError;
 use crate::protocol::xproto::GetPropertyReply;
+use crate::SocketConnection;
+use std::ffi::OsString;
 
-pub use x11rb_protocol::resource_manager::Database;
+pub mod protocol;
+use crate::x11_utils::{TryParse, X11Error};
+use protocol::Database;
 
-fn send_request(conn: &impl Connection) -> Result<GetPropertyReply, ReplyError> {
+fn send_request(conn: &mut SocketConnection) -> Result<GetPropertyReply, ReplyError> {
     let mut request = Database::GET_RESOURCE_DATABASE;
     request.window = conn.setup().roots[0].root;
-    conn.send_trait_request_with_reply(request)?.reply()
+    let seq = conn.write(request.serialize().as_ref(), false)?;
+    let response = conn.block_for_reply(seq)?;
+    if let Ok((reply, _)) = GetPropertyReply::try_parse(&response) {
+        Ok(reply)
+    } else {
+        Err(ReplyError::X11Error(X11Error::try_parse(
+            &response,
+            &conn.extensions,
+        )?))
+    }
 }
 
 /// Create a new X11 resource database from the `RESOURCE_MANAGER` property of the first
@@ -36,7 +32,9 @@ fn send_request(conn: &impl Connection) -> Result<GetPropertyReply, ReplyError> 
 /// This function returns an error if the `GetProperty` request to get the `RESOURCE_MANAGER`
 /// property fails. It returns `Ok(None)` if the property does not exist, has the wrong format,
 /// or is empty.
-pub fn new_from_resource_manager(conn: &impl Connection) -> Result<Option<Database>, ReplyError> {
+pub fn new_from_resource_manager(
+    conn: &mut SocketConnection,
+) -> Result<Option<Database>, ReplyError> {
     Ok(Database::new_from_get_property_reply(&send_request(conn)?))
 }
 
@@ -45,7 +43,7 @@ pub fn new_from_resource_manager(conn: &impl Connection) -> Result<Option<Databa
 /// The default location is a combination of two places. First, the following places are
 /// searched for data:
 /// - The `RESOURCE_MANAGER` property of the first screen's root window (See
-///   [`new_from_resource_manager`]).
+///   [`Self::new_from_resource_manager`]).
 /// - If not found, the file `$HOME/.Xresources` is loaded.
 /// - If not found, the file `$HOME/.Xdefaults` is loaded.
 ///
@@ -61,9 +59,9 @@ pub fn new_from_resource_manager(conn: &impl Connection) -> Result<Option<Databa
 ///
 /// The behaviour of this function is equivalent to xcb-util-xrm's
 /// `xcb_xrm_database_from_default()`.
-pub fn new_from_default(conn: &impl Connection) -> Result<Database, ReplyError> {
+pub fn new_from_default(conn: &mut SocketConnection) -> Result<Database, ReplyError> {
     Ok(Database::new_from_default(
         &send_request(conn)?,
-        gethostname::gethostname(),
+        OsString::from("localhost"), // TODO: Maybe fix?
     ))
 }

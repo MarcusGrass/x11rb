@@ -62,7 +62,7 @@ impl Caches {
                     None => entry_value.wire_size = Some((wire_size, wire_size)),
                     Some((ref mut min, ref mut max)) => {
                         *min = (*min).min(wire_size);
-                        *max = (*max).max(wire_size)
+                        *max = (*max).max(wire_size);
                     }
                 }
             }
@@ -112,17 +112,17 @@ impl Caches {
                         }
                     }
                     xcbdefs::TypeDef::Union(union_def) => {
-                        for field in union_def.fields.iter() {
+                        for field in &union_def.fields {
                             self.gather_enum_infos_in_field(field);
                         }
                     }
-                    xcbdefs::TypeDef::EventStruct(_) => {}
-                    xcbdefs::TypeDef::Xid(_) => {}
-                    xcbdefs::TypeDef::XidUnion(_) => {}
+                    xcbdefs::TypeDef::EventStruct(_)
+                    | xcbdefs::TypeDef::Xid(_)
+                    | xcbdefs::TypeDef::Alias(_)
+                    | xcbdefs::TypeDef::XidUnion(_) => {}
                     xcbdefs::TypeDef::Enum(enum_def) => {
                         self.gather_enum_infos_in_enum_def(enum_def);
                     }
-                    xcbdefs::TypeDef::Alias(_) => {}
                 }
             }
         }
@@ -130,7 +130,6 @@ impl Caches {
 
     fn gather_enum_infos_in_field(&mut self, field: &xcbdefs::FieldDef) {
         match field {
-            xcbdefs::FieldDef::Pad(_) => {}
             xcbdefs::FieldDef::Normal(normal_field) => {
                 self.gather_enum_infos_in_field_value_type(&normal_field.type_);
             }
@@ -138,24 +137,24 @@ impl Caches {
                 self.gather_enum_infos_in_field_value_type(&list_field.element_type);
             }
             xcbdefs::FieldDef::Switch(switch_field) => {
-                for case in switch_field.cases.iter() {
+                for case in &switch_field.cases {
                     for field in case.fields.borrow().iter() {
                         self.gather_enum_infos_in_field(field);
                     }
                 }
             }
-            xcbdefs::FieldDef::Fd(_) => {}
-            xcbdefs::FieldDef::FdList(_) => {}
+            xcbdefs::FieldDef::Fd(_)
+            | xcbdefs::FieldDef::Pad(_)
+            | xcbdefs::FieldDef::VirtualLen(_)
+            | xcbdefs::FieldDef::FdList(_) => {}
             xcbdefs::FieldDef::Expr(expr_field) => {
                 self.gather_enum_infos_in_field_value_type(&expr_field.type_);
             }
-            xcbdefs::FieldDef::VirtualLen(_) => {}
         }
     }
 
     fn gather_enum_infos_in_field_value_type(&mut self, value_type: &xcbdefs::FieldValueType) {
         match value_type.value_set {
-            xcbdefs::FieldValueSet::None => {}
             xcbdefs::FieldValueSet::Enum(ref enum_type) => {
                 let enum_def = match enum_type.get_resolved().get_original_type() {
                     xcbdefs::TypeRef::Enum(enum_type) => enum_type.upgrade().unwrap(),
@@ -164,17 +163,19 @@ impl Caches {
 
                 let size = match value_type.type_.get_resolved().get_original_type() {
                     xcbdefs::TypeRef::BuiltIn(xcbdefs::BuiltInType::Bool) => 1,
-                    xcbdefs::TypeRef::BuiltIn(xcbdefs::BuiltInType::Card8) => 8,
+                    xcbdefs::TypeRef::BuiltIn(
+                        xcbdefs::BuiltInType::Card8 | xcbdefs::BuiltInType::Byte,
+                    ) => 8,
                     xcbdefs::TypeRef::BuiltIn(xcbdefs::BuiltInType::Card16) => 16,
                     xcbdefs::TypeRef::BuiltIn(xcbdefs::BuiltInType::Card32) => 32,
-                    xcbdefs::TypeRef::BuiltIn(xcbdefs::BuiltInType::Byte) => 8,
                     _ => unreachable!(),
                 };
                 self.put_enum_wire_size(&enum_def, size);
             }
-            xcbdefs::FieldValueSet::AltEnum(_) => {}
-            xcbdefs::FieldValueSet::Mask(_) => {}
-            xcbdefs::FieldValueSet::AltMask(_) => {}
+            xcbdefs::FieldValueSet::AltEnum(_)
+            | xcbdefs::FieldValueSet::AltMask(_)
+            | xcbdefs::FieldValueSet::Mask(_)
+            | xcbdefs::FieldValueSet::None => {}
         }
     }
 
@@ -205,6 +206,7 @@ impl Caches {
 }
 
 #[derive(Copy, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct Derives {
     pub(super) debug: bool,
     pub(super) clone: bool,
@@ -267,7 +269,7 @@ impl Derives {
             list.push("Eq");
         }
         if self.partial_ord {
-            list.push("PartialOrd")
+            list.push("PartialOrd");
         }
         if self.ord {
             list.push("Ord");
@@ -359,15 +361,12 @@ pub(super) fn gather_deducible_fields(
                 if bin_op_expr.operator == xcbdefs::BinaryOperator::Mul {
                     match (&*bin_op_expr.lhs, &*bin_op_expr.rhs) {
                         (
-                            xcbdefs::Expression::FieldRef(field_ref_expr),
-                            xcbdefs::Expression::Value(value),
-                        ) => Some((
-                            field_ref_expr.field_name.clone(),
-                            DeducibleLengthFieldOp::Div(*value),
-                        )),
-                        (
                             xcbdefs::Expression::Value(value),
                             xcbdefs::Expression::FieldRef(field_ref_expr),
+                        )
+                        | (
+                            xcbdefs::Expression::FieldRef(field_ref_expr),
+                            xcbdefs::Expression::Value(value),
                         ) => Some((
                             field_ref_expr.field_name.clone(),
                             DeducibleLengthFieldOp::Div(*value),
@@ -498,10 +497,8 @@ pub(super) fn gather_deducible_fields(
 }
 
 /// A helper to note what owns a field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub(super) enum FieldContainer {
-    /// This field is part of a request.
-    Request(String),
     /// The field belongs to something else.
     Other,
 }

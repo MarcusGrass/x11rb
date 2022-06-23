@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::generator::namespace::{emit_doc, ext_params_to_call_args, field_is_visible};
 use xcbgen::defs as xcbdefs;
 
 use super::{
@@ -9,6 +10,7 @@ use super::{
 };
 
 // FIXME: `skip_length_field` is broken
+#[allow(clippy::fn_params_excessive_bools)]
 pub(super) fn emit_struct_type(
     generator: &NamespaceGenerator<'_, '_>,
     name: &str,
@@ -38,29 +40,16 @@ pub(super) fn emit_struct_type(
         out,
     );
 
-    let has_fds = fields.iter().any(|field| {
-        matches!(
-            field,
-            xcbdefs::FieldDef::Fd(_) | xcbdefs::FieldDef::FdList(_)
-        )
-    });
-
     if let Some(doc) = doc {
-        generator.emit_doc(doc, out, Some(&deducible_fields));
+        emit_doc(doc, out, Some(&deducible_fields));
     }
     let derives = derives.to_list();
     if !derives.is_empty() {
         outln!(out, "#[derive({})]", derives.join(", "));
     }
-    if !has_fds {
-        outln!(
-            out,
-            r#"#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]"#
-        );
-    }
     outln!(out, "pub struct {} {{", name);
     for field in fields.iter() {
-        if generator.field_is_visible(field, &deducible_fields) {
+        if field_is_visible(field, &deducible_fields) {
             let field_name = field.name().unwrap();
             if !skip_length_field || field_name != "length" {
                 let field_type = generator.field_to_rust_type(field, switch_prefix);
@@ -75,22 +64,29 @@ pub(super) fn emit_struct_type(
     }
     outln!(out, "}}");
 
+    if fields.iter().any(|field| {
+        matches!(
+            field,
+            xcbdefs::FieldDef::Fd(_) | xcbdefs::FieldDef::FdList(_)
+        )
+    }) {
+        return;
+    }
+
     if generate_try_parse {
-        let input_name = if parse_size_constraint != StructSizeConstraint::None {
-            "initial_value"
-        } else {
+        let input_name = if parse_size_constraint == StructSizeConstraint::None {
             "remaining"
+        } else {
+            "initial_value"
         };
-        if has_fds {
-            assert!(external_params.is_empty());
-            outln!(out, "impl TryParseFd for {} {{", name);
+        if external_params.is_empty() {
+            outln!(out, "impl TryParse for {} {{", name);
             outln!(
                 out.indent(),
-                "fn try_parse_fd<'a>({}: &'a [u8], fds: &mut Vec<RawFdContainer>) -> \
-                 Result<(Self, &'a [u8]), ParseError> {{",
+                "fn try_parse({}: &[u8]) -> Result<(Self, &[u8]), ParseError> {{",
                 input_name,
             );
-        } else if !external_params.is_empty() {
+        } else {
             outln!(out, "impl {} {{", name);
             let p = external_params
                 .iter()
@@ -107,13 +103,6 @@ pub(super) fn emit_struct_type(
                 "pub fn try_parse({}: &[u8], {}) -> Result<(Self, &[u8]), ParseError> {{",
                 input_name,
                 p.join(", "),
-            );
-        } else {
-            outln!(out, "impl TryParse for {} {{", name);
-            outln!(
-                out.indent(),
-                "fn try_parse({}: &[u8]) -> Result<(Self, &[u8]), ParseError> {{",
-                input_name,
             );
         }
 
@@ -134,18 +123,16 @@ pub(super) fn emit_struct_type(
                     );
                 }
                 for field in fields.iter() {
-                    if !field
-                        .name()
-                        .map(|field_name| deducible_fields.contains_key(field_name))
-                        .unwrap_or(false)
-                    {
+                    if !field.name().map_or(false, |field_name| {
+                        deducible_fields.contains_key(field_name)
+                    }) {
                         parse::emit_field_post_parse(field, out);
                     }
                 }
                 let field_names = fields
                     .iter()
                     .filter_map(|field| {
-                        if generator.field_is_visible(field, &deducible_fields) {
+                        if field_is_visible(field, &deducible_fields) {
                             Some(to_rust_variable_name(field.name().unwrap()))
                         } else {
                             None
@@ -176,7 +163,7 @@ pub(super) fn emit_struct_type(
                     }
                 }
                 outln!(out, "Ok((result, remaining))");
-            })
+            });
         });
 
         outln!(out.indent(), "}}");
@@ -269,6 +256,7 @@ pub(super) fn emit_struct_type(
                     out,
                     "/// cannot happen with values of the struct received from the X11 server.",
                 );
+                outln!(out, "#[must_use]");
                 outln!(
                     out,
                     "pub fn {}(&self) -> {} {{",
@@ -357,10 +345,10 @@ fn emit_fixed_size_struct_serialize(
                     deducible_fields,
                     |field_name| {
                         let rust_field_name = to_rust_variable_name(field_name);
-                        if !deducible_fields.contains_key(field_name) {
-                            format!("self.{}", rust_field_name)
-                        } else {
+                        if deducible_fields.contains_key(field_name) {
                             rust_field_name
+                        } else {
+                            format!("self.{}", rust_field_name)
                         }
                     },
                     &mut result_bytes,
@@ -368,7 +356,7 @@ fn emit_fixed_size_struct_serialize(
                 );
             }
             outln!(out, "[");
-            for result_byte in result_bytes.iter() {
+            for result_byte in &result_bytes {
                 outln!(out.indent(), "{},", result_byte);
             }
             outln!(out, "]");
@@ -420,7 +408,7 @@ fn emit_variable_size_struct_serialize(
 ) {
     let ext_params_arg_defs = generator.ext_params_to_arg_defs(true, external_params);
     let ext_params_call_args =
-        generator.ext_params_to_call_args(true, to_rust_variable_name, external_params);
+        ext_params_to_call_args(true, to_rust_variable_name, external_params);
 
     if external_params.is_empty() {
         outln!(out, "impl Serialize for {} {{", name);
@@ -430,14 +418,20 @@ fn emit_variable_size_struct_serialize(
     out.indented(|out| {
         if external_params.is_empty() {
             outln!(out, "type Bytes = Vec<u8>;");
+            outln!(
+                out,
+                "fn serialize(&self{}) -> Self::Bytes {{",
+                ext_params_arg_defs,
+            );
         } else {
             outln!(out, "#[allow(dead_code)]");
+            outln!(
+                out,
+                "fn serialize(&self{}) -> impl AsRef<[u8]> {{",
+                ext_params_arg_defs,
+            );
         }
-        outln!(
-            out,
-            "fn serialize(&self{}) -> Vec<u8> {{",
-            ext_params_arg_defs,
-        );
+
         out.indented(|out| {
             outln!(out, "let mut result = Vec::new();");
             outln!(

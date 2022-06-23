@@ -15,7 +15,6 @@ mod header;
 pub(super) mod helpers;
 mod parse;
 mod request;
-mod resource_wrapper;
 mod serialize;
 mod struct_type;
 mod switch;
@@ -31,24 +30,16 @@ use helpers::{
 
 /// Generate a Rust module for namespace `ns`.
 pub(super) fn generate(
-    module: &xcbgen::defs::Module,
     ns: &xcbdefs::Namespace,
     caches: &RefCell<Caches>,
     proto_out: &mut Output,
     x11rb_out: &mut Output,
     enum_cases: &mut EnumCases,
-    resource_info: &[super::ResourceInfo<'_>],
 ) {
-    NamespaceGenerator::new(module, ns, caches).generate(
-        proto_out,
-        x11rb_out,
-        enum_cases,
-        resource_info,
-    );
+    NamespaceGenerator::new(ns, caches).generate(proto_out, x11rb_out, enum_cases);
 }
 
 struct NamespaceGenerator<'ns, 'c> {
-    module: &'ns xcbgen::defs::Module,
     ns: &'ns xcbdefs::Namespace,
     caches: &'c RefCell<Caches>,
 
@@ -58,31 +49,20 @@ struct NamespaceGenerator<'ns, 'c> {
 
 impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
     #[inline]
-    fn new(
-        module: &'ns xcbgen::defs::Module,
-        ns: &'ns xcbdefs::Namespace,
-        caches: &'c RefCell<Caches>,
-    ) -> Self {
+    fn new(ns: &'ns xcbdefs::Namespace, caches: &'c RefCell<Caches>) -> Self {
         let option_name = if ns.header == "present" {
             "std::option::Option"
         } else {
             "Option"
         };
         NamespaceGenerator {
-            module,
             ns,
             caches,
             option_name,
         }
     }
 
-    fn generate(
-        &self,
-        proto_out: &mut Output,
-        x11rb_out: &mut Output,
-        enum_cases: &mut EnumCases,
-        resource_info: &[super::ResourceInfo<'_>],
-    ) {
+    fn generate(&self, proto_out: &mut Output, x11rb_out: &mut Output, enum_cases: &mut EnumCases) {
         super::write_code_header(proto_out);
         super::write_code_header(x11rb_out);
         header::write_header(proto_out, self.ns, header::Mode::Protocol);
@@ -101,7 +81,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                         x11rb_out,
                         &mut trait_out,
                         cases_entry,
-                    )
+                    );
                 }
                 xcbdefs::Def::Event(event_def) => match event_def {
                     xcbdefs::EventDef::Full(event_full_def) => {
@@ -121,45 +101,26 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                 },
                 xcbdefs::Def::Type(type_def) => match type_def {
                     xcbdefs::TypeDef::Struct(struct_def) => {
-                        self.generate_struct_def(struct_def, proto_out)
+                        self.generate_struct_def(struct_def, proto_out);
                     }
                     xcbdefs::TypeDef::Union(union_def) => {
-                        self.generate_union_def(union_def, proto_out)
+                        self.generate_union_def(union_def, proto_out);
                     }
                     xcbdefs::TypeDef::EventStruct(event_struct_def) => {
                         self.generate_event_struct_def(event_struct_def, proto_out);
                     }
                     xcbdefs::TypeDef::Xid(xid_type_def) => {
-                        self.generate_xid_type_def(xid_type_def, proto_out)
+                        self.generate_xid_type_def(xid_type_def, proto_out);
                     }
                     xcbdefs::TypeDef::XidUnion(xid_union_def) => {
-                        self.generate_xid_union_def(xid_union_def, proto_out)
+                        self.generate_xid_union_def(xid_union_def, proto_out);
                     }
                     xcbdefs::TypeDef::Enum(enum_def) => self.generate_enum_def(enum_def, proto_out),
                     xcbdefs::TypeDef::Alias(type_alias_def) => {
-                        self.generate_type_alias_def(type_alias_def, proto_out)
+                        self.generate_type_alias_def(type_alias_def, proto_out);
                     }
                 },
             }
-        }
-
-        let trait_out = trait_out.into_data();
-
-        outln!(
-            x11rb_out,
-            "/// Extension trait defining the requests of this extension.",
-        );
-        outln!(x11rb_out, "pub trait ConnectionExt: RequestConnection {{");
-        out!(x11rb_out.indent(), "{}", trait_out);
-        outln!(x11rb_out, "}}");
-        outln!(x11rb_out, "");
-        outln!(
-            x11rb_out,
-            "impl<C: RequestConnection + ?Sized> ConnectionExt for C {{}}",
-        );
-
-        for info in resource_info {
-            resource_wrapper::generate(self, x11rb_out, info);
         }
     }
 
@@ -303,10 +264,10 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                         deducible_fields,
                         |field_name| {
                             let rust_field_name = to_rust_variable_name(field_name);
-                            if !deducible_fields.contains_key(field_name) {
-                                format!("input.{}", rust_field_name)
-                            } else {
+                            if deducible_fields.contains_key(field_name) {
                                 rust_field_name
+                            } else {
+                                format!("input.{}", rust_field_name)
                             }
                         },
                         &mut result_bytes,
@@ -315,7 +276,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                 }
                 assert!(result_bytes.len() <= 32);
                 outln!(out, "[");
-                for result_byte in result_bytes.iter() {
+                for result_byte in &result_bytes {
                     outln!(out.indent(), "{},", result_byte);
                 }
                 if result_bytes.len() != 32 {
@@ -375,10 +336,6 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
         let union_size = union_def.size();
 
         outln!(out, "#[derive(Debug, Copy, Clone)]");
-        outln!(
-            out,
-            r#"#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]"#
-        );
         outln!(out, "pub struct {}([u8; {}]);", rust_name, union_size);
 
         let fields = union_def.fields.as_slice();
@@ -388,6 +345,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
             for field in fields.iter() {
                 let rust_field_type = self.field_to_rust_type(field, &rust_name);
                 let rust_field_name = to_rust_variable_name(field.name().unwrap());
+                outln!(out, "#[must_use]");
                 outln!(
                     out,
                     "pub fn {}(&self) -> {} {{",
@@ -462,7 +420,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
             // to make sure there are not repeated `From`s.
             let orig_rust_field_type = match field {
                 xcbdefs::FieldDef::Normal(normal_field) => {
-                    if let Some(enum_def) = self.use_enum_type_in_field(&normal_field.type_) {
+                    if let Some(enum_def) = use_enum_type_in_field(&normal_field.type_) {
                         let ns = enum_def.namespace.upgrade().unwrap();
                         self.type_name_to_rust_type(&self.get_enum_rust_name(&enum_def), &ns)
                     } else {
@@ -472,20 +430,19 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                     }
                 }
                 xcbdefs::FieldDef::List(list_field) => {
-                    let element_type = if let Some(enum_def) =
-                        self.use_enum_type_in_field(&list_field.element_type)
-                    {
-                        let ns = enum_def.namespace.upgrade().unwrap();
-                        self.type_name_to_rust_type(&self.get_enum_rust_name(&enum_def), &ns)
-                    } else {
-                        self.type_to_rust_type(
-                            &list_field
-                                .element_type
-                                .type_
-                                .get_resolved()
-                                .get_original_type(),
-                        )
-                    };
+                    let element_type =
+                        if let Some(enum_def) = use_enum_type_in_field(&list_field.element_type) {
+                            let ns = enum_def.namespace.upgrade().unwrap();
+                            self.type_name_to_rust_type(&self.get_enum_rust_name(&enum_def), &ns)
+                        } else {
+                            self.type_to_rust_type(
+                                &list_field
+                                    .element_type
+                                    .type_
+                                    .get_resolved()
+                                    .get_original_type(),
+                            )
+                        };
                     if let Some(list_length) = list_field.length() {
                         format!("[{}; {}]", element_type, list_length)
                     } else {
@@ -524,7 +481,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                         outln!(out, "Self({})", bytes_name.unwrap());
                     } else {
                         outln!(out, "let value = [");
-                        for result_byte in result_bytes.iter() {
+                        for result_byte in &result_bytes {
                             outln!(out.indent(), "{},", result_byte);
                         }
                         // This is needed to handle cases such as Behavior.type or
@@ -556,24 +513,21 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
     ) {
         let rust_name = self.get_event_struct_rust_name(event_struct_def);
 
-        for allowed in event_struct_def.alloweds.iter() {
+        for allowed in &event_struct_def.alloweds {
             assert!(!allowed.xge, "xge in eventstruct not supported");
         }
 
         outln!(out, "#[derive(Debug, Copy, Clone)]");
-        outln!(
-            out,
-            r#"#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]"#
-        );
         outln!(out, "pub struct {}([u8; 32]);", rust_name);
 
         outln!(out, "impl {} {{", rust_name);
         out.indented(|out| {
-            for allowed in event_struct_def.alloweds.iter() {
+            for allowed in &event_struct_def.alloweds {
                 for event in allowed.resolved.borrow().iter() {
                     let rust_event_name =
                         format!("{}Event", to_rust_type_name(event.as_event_def().name()));
                     let rust_event_type = self.event_to_rust_type(event);
+                    outln!(out, "#[must_use]");
                     outln!(
                         out,
                         "pub fn {}(&self) -> {} {{",
@@ -626,7 +580,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
 
         let mut events_with_from = HashSet::new();
 
-        for allowed in event_struct_def.alloweds.iter() {
+        for allowed in &event_struct_def.alloweds {
             for event in allowed.resolved.borrow().iter() {
                 let rust_original_event_type = self.event_def_to_rust_type(
                     &xcbdefs::EventDef::Full(event.get_original_full_def()),
@@ -693,23 +647,30 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
             };
 
         if let Some(ref doc) = enum_def.doc {
-            self.emit_doc(doc, out, None);
+            emit_doc(doc, out, None);
         }
 
         outln!(
             out,
             "#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]"
         );
-        outln!(
-            out,
-            r#"#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]"#
-        );
         outln!(out, "pub struct {}({});", rust_name, raw_type);
 
         outln!(out, "impl {} {{", rust_name);
-        for enum_item in enum_def.items.iter() {
+        for enum_item in &enum_def.items {
             let rust_item_name = ename_to_rust(&enum_item.name);
-            if global_enum_size != 1 {
+            if global_enum_size == 1 {
+                let value = match enum_item.value {
+                    xcbdefs::EnumValue::Value(value) => value,
+                    xcbdefs::EnumValue::Bit(bit) => 1 << bit,
+                };
+                outln!(
+                    out.indent(),
+                    "pub const {}: Self = Self({});",
+                    rust_item_name,
+                    if value == 0 { "false" } else { "true" },
+                );
+            } else {
                 match enum_item.value {
                     xcbdefs::EnumValue::Value(value) => {
                         outln!(
@@ -728,17 +689,6 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                         );
                     }
                 }
-            } else {
-                let value = match enum_item.value {
-                    xcbdefs::EnumValue::Value(value) => value,
-                    xcbdefs::EnumValue::Bit(bit) => 1 << bit,
-                };
-                outln!(
-                    out.indent(),
-                    "pub const {}: Self = Self({});",
-                    rust_item_name,
-                    if value == 0 { "false" } else { "true" },
-                );
             }
         }
         outln!(out, "}}");
@@ -839,7 +789,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                     _ => ".into()",
                 };
                 outln!(out, "let variants = [");
-                for enum_item in enum_def.items.iter() {
+                for enum_item in &enum_def.items {
                     let rust_item_name = ename_to_rust(&enum_item.name);
                     let camel_item_name = ename_to_camel_case(&enum_item.name);
                     outln!(
@@ -863,7 +813,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
         outln!(out, "}}");
 
         if ok_for_bitmask {
-            outln!(out, "bitmask_binop!({}, {});", rust_name, raw_type);
+            outln!(out, "crate::bitmask_binop!({}, {});", rust_name, raw_type);
         }
 
         outln!(out, "");
@@ -922,7 +872,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                         DeducibleLengthFieldOp::Div(n) => {
                             outln!(
                                 out,
-                                "assert_eq!({} % {}, 0, \"`{}` has an incorrect length, must be a \
+                                "debug_assert_eq!({} % {}, 0, \"`{}` has an incorrect length, must be a \
                                  multiple of {}\");",
                                 list_len,
                                 n,
@@ -943,7 +893,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
             DeducibleField::CaseSwitchExpr(switch_field_name, op) => {
                 match op {
                     DeducibleFieldOp::None => (),
-                    _ => unreachable!(),
+                    DeducibleFieldOp::Or(_) => unreachable!(),
                 }
                 if let xcbdefs::FieldDef::Normal(normal_field) = field {
                     let field_type = normal_field.type_.type_.get_resolved();
@@ -990,145 +940,6 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                 }
             }
         }
-    }
-
-    fn rust_value_type_is_u8(&self, type_: &xcbdefs::FieldValueType) -> bool {
-        if self.use_enum_type_in_field(type_).is_some() {
-            false
-        } else {
-            let original_type = match type_.type_.get_resolved() {
-                xcbdefs::TypeRef::Alias(type_alias_def) => {
-                    type_alias_def.upgrade().unwrap().get_original_type()
-                }
-                type_ => type_.clone(),
-            };
-            matches!(
-                original_type,
-                xcbdefs::TypeRef::BuiltIn(xcbdefs::BuiltInType::Card8)
-                    | xcbdefs::TypeRef::BuiltIn(xcbdefs::BuiltInType::Byte)
-                    | xcbdefs::TypeRef::BuiltIn(xcbdefs::BuiltInType::Char)
-                    | xcbdefs::TypeRef::BuiltIn(xcbdefs::BuiltInType::Void)
-            )
-        }
-    }
-
-    fn use_enum_type_in_field(
-        &self,
-        type_: &xcbdefs::FieldValueType,
-    ) -> Option<Rc<xcbdefs::EnumDef>> {
-        if let xcbdefs::FieldValueSet::Enum(ref enum_) = type_.value_set {
-            let enum_def = match enum_.get_resolved() {
-                xcbdefs::TypeRef::Enum(enum_def) => enum_def.upgrade().unwrap(),
-                _ => unreachable!(),
-            };
-            Some(enum_def)
-        } else {
-            None
-        }
-    }
-
-    fn emit_doc(
-        &self,
-        doc: &xcbdefs::Doc,
-        out: &mut Output,
-        deducible_fields: Option<&HashMap<String, DeducibleField>>,
-    ) {
-        let mut has_doc = false;
-        if let Some(ref brief) = doc.brief {
-            outln!(out, "/// {}.", brief);
-            has_doc = true;
-        }
-        if let Some(ref description) = doc.description {
-            if has_doc {
-                outln!(out, "///");
-            }
-            has_doc = true;
-            for line in description.trim().split('\n') {
-                if line.trim().is_empty() {
-                    outln!(out, "///");
-                } else {
-                    outln!(out, "/// {}", line.trim_end());
-                }
-            }
-        }
-        if !doc.fields.is_empty() {
-            if has_doc {
-                outln!(out, "///");
-            }
-            has_doc = true;
-            outln!(out, "/// # Fields");
-            outln!(out, "///");
-            for field in doc.fields.iter() {
-                if deducible_fields
-                    .map(|deducible_fields| deducible_fields.contains_key(&field.name))
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                let text = format!(
-                    " * `{}` - {}",
-                    field.name,
-                    field.doc.as_deref().unwrap_or("").trim(),
-                );
-                // Prevent rustdoc interpreting many leading spaces as code examples (?)
-                for line in text.trim().split('\n') {
-                    let line = line.trim();
-                    if line.trim().is_empty() {
-                        outln!(out, "///");
-                    } else {
-                        outln!(out, "/// {}", line);
-                    }
-                }
-            }
-        }
-        if !doc.errors.is_empty() {
-            if has_doc {
-                outln!(out, "///");
-            }
-            has_doc = true;
-            outln!(out, "/// # Errors");
-            outln!(out, "///");
-            for error in doc.errors.iter() {
-                let text = format!(
-                    "* `{}` - {}",
-                    error.type_,
-                    error.doc.as_deref().unwrap_or("").trim(),
-                );
-                for line in text.split('\n') {
-                    outln!(out, "/// {}", line.trim_end());
-                }
-            }
-        }
-        if !doc.sees.is_empty() {
-            if has_doc {
-                outln!(out, "///");
-            }
-            has_doc = true;
-            outln!(out, "/// # See");
-            outln!(out, "///");
-            for see in doc.sees.iter() {
-                outln!(out, "/// * `{}`: {}", see.name, see.type_);
-            }
-        }
-        if let Some(ref example) = doc.example {
-            if has_doc {
-                outln!(out, "///");
-            }
-            has_doc = true;
-            outln!(out, "/// # Example");
-            outln!(out, "///");
-            outln!(out, "/// ```text");
-            for line in example.trim().split('\n') {
-                if line.trim().is_empty() {
-                    outln!(out, "///");
-                } else {
-                    outln!(out, "/// {}", line.trim_end());
-                }
-            }
-            outln!(out, "/// ```");
-        }
-        // Empty doc?
-        assert!(has_doc);
     }
 
     fn name_is_used_by_non_enum(&self, name: &str, ns: &xcbdefs::Namespace) -> bool {
@@ -1230,31 +1041,13 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
             }
             s.push_str(&to_rust_variable_name(&ext_param.name));
             s.push_str(": ");
-            s.push_str(&self.type_to_rust_type(&ext_param.type_))
+            s.push_str(&self.type_to_rust_type(&ext_param.type_));
         }
         s
     }
-
-    fn ext_params_to_call_args(
-        &self,
-        begin_with_comma: bool,
-        mut wrap_name: impl FnMut(&str) -> String,
-        ext_params: &[xcbdefs::ExternalParam],
-    ) -> String {
-        let mut s = String::new();
-        for (i, ext_param) in ext_params.iter().enumerate() {
-            if i != 0 || begin_with_comma {
-                s.push_str(", ");
-            }
-            s.push_str(&wrap_name(&ext_param.name));
-        }
-        s
-    }
-
     /// Returns the Rust type for `field`.
     fn field_to_rust_type(&self, field: &xcbdefs::FieldDef, switch_prefix: &str) -> String {
         match field {
-            xcbdefs::FieldDef::Pad(_) => unreachable!(),
             xcbdefs::FieldDef::Normal(normal_field) => {
                 self.field_value_type_to_rust_type(&normal_field.type_)
             }
@@ -1271,8 +1064,9 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
             }
             xcbdefs::FieldDef::Fd(_) => "RawFdContainer".into(),
             xcbdefs::FieldDef::FdList(_) => "Vec<RawFdContainer>".into(),
-            xcbdefs::FieldDef::Expr(_) => unreachable!(),
-            xcbdefs::FieldDef::VirtualLen(_) => unreachable!(),
+            xcbdefs::FieldDef::Expr(_)
+            | xcbdefs::FieldDef::VirtualLen(_)
+            | xcbdefs::FieldDef::Pad(_) => unreachable!(),
         }
     }
 
@@ -1280,7 +1074,10 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
     fn type_to_rust_type(&self, type_: &xcbdefs::TypeRef) -> String {
         match type_ {
             xcbdefs::TypeRef::BuiltIn(builtin_type) => match builtin_type {
-                xcbdefs::BuiltInType::Card8 => "u8".into(),
+                xcbdefs::BuiltInType::Card8
+                | xcbdefs::BuiltInType::Byte
+                | xcbdefs::BuiltInType::Char
+                | xcbdefs::BuiltInType::Void => "u8".into(),
                 xcbdefs::BuiltInType::Card16 => "u16".into(),
                 xcbdefs::BuiltInType::Card32 => "u32".into(),
                 xcbdefs::BuiltInType::Card64 => "u64".into(),
@@ -1288,12 +1085,9 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                 xcbdefs::BuiltInType::Int16 => "i16".into(),
                 xcbdefs::BuiltInType::Int32 => "i32".into(),
                 xcbdefs::BuiltInType::Int64 => "i64".into(),
-                xcbdefs::BuiltInType::Byte => "u8".into(),
                 xcbdefs::BuiltInType::Bool => "bool".into(),
-                xcbdefs::BuiltInType::Char => "u8".into(),
                 xcbdefs::BuiltInType::Float => "f32".into(),
                 xcbdefs::BuiltInType::Double => "f64".into(),
-                xcbdefs::BuiltInType::Void => "u8".into(),
             },
             xcbdefs::TypeRef::Struct(struct_def) => {
                 let struct_def = struct_def.upgrade().unwrap();
@@ -1342,7 +1136,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
 
     /// Returns the Rust type for `value_type`.
     fn field_value_type_to_rust_type(&self, value_type: &xcbdefs::FieldValueType) -> String {
-        if let Some(enum_def) = self.use_enum_type_in_field(value_type) {
+        if let Some(enum_def) = use_enum_type_in_field(value_type) {
             let ns = enum_def.namespace.upgrade().unwrap();
             self.type_name_to_rust_type(&self.get_enum_rust_name(&enum_def), &ns)
         } else {
@@ -1373,32 +1167,12 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
         self.type_name_to_rust_type(&rust_name, &namespace)
     }
 
-    /// Returns the parameters needed by the `try_parse` function for `type_`.
-    fn get_type_parse_params(&self, type_: &xcbdefs::TypeRef, remaining: &str) -> Vec<String> {
-        let mut params = vec![String::from(remaining)];
-
-        let original_type = if let xcbdefs::TypeRef::Alias(type_alias_def) = type_ {
-            type_alias_def.upgrade().unwrap().get_original_type()
-        } else {
-            type_.clone()
-        };
-
-        if let xcbdefs::TypeRef::Struct(struct_def) = original_type {
-            let struct_def = struct_def.upgrade().unwrap();
-            for ext_param in struct_def.external_params.borrow().iter() {
-                params.push(to_rust_variable_name(&ext_param.name));
-            }
-        }
-
-        params
-    }
-
     /// Gets the traits that can be implemented for `struct_def`.
     fn get_derives_for_struct_def(&self, struct_def: &xcbdefs::StructDef) -> Derives {
         let id = struct_def as *const xcbdefs::StructDef as usize;
 
         let caches = self.caches.borrow();
-        if let Some(derives) = caches.derives.get(&id).cloned() {
+        if let Some(derives) = caches.derives.get(&id).copied() {
             derives
         } else {
             drop(caches);
@@ -1419,7 +1193,6 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
     ) {
         for field in fields.iter() {
             match field {
-                xcbdefs::FieldDef::Pad(_) => {}
                 xcbdefs::FieldDef::Normal(normal_field) => {
                     self.filter_derives_for_type(derives, normal_field.type_.type_.get_resolved());
                 }
@@ -1443,7 +1216,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                     if switch_field.kind != xcbdefs::SwitchKind::BitCase {
                         derives.default_ = false;
                     }
-                    for case in switch_field.cases.iter() {
+                    for case in &switch_field.cases {
                         self.filter_derives_for_fields(
                             derives,
                             &*case.fields.borrow(),
@@ -1464,8 +1237,9 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                     derives.hash = false;
                     derives.default_ = false;
                 }
-                xcbdefs::FieldDef::Expr(_) => {}
-                xcbdefs::FieldDef::VirtualLen(_) => {}
+                xcbdefs::FieldDef::Expr(_)
+                | xcbdefs::FieldDef::VirtualLen(_)
+                | xcbdefs::FieldDef::Pad(_) => {}
             }
         }
     }
@@ -1490,7 +1264,7 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                 let struct_derives = self.get_derives_for_struct_def(&struct_def);
                 derives.intersect(struct_derives);
             }
-            xcbdefs::TypeRef::Union(_) => {
+            xcbdefs::TypeRef::Union(_) | xcbdefs::TypeRef::EventStruct(_) => {
                 // Comparing unions makes no sense (in the current implementation)
                 derives.partial_eq = false;
                 derives.eq = false;
@@ -1499,42 +1273,201 @@ impl<'ns, 'c> NamespaceGenerator<'ns, 'c> {
                 derives.hash = false;
                 derives.default_ = false;
             }
-            xcbdefs::TypeRef::EventStruct(_) => {
-                // Event structs don't support equality tests.
-                derives.partial_eq = false;
-                derives.eq = false;
-                derives.partial_ord = false;
-                derives.ord = false;
-                derives.hash = false;
-                derives.default_ = false;
-            }
-            xcbdefs::TypeRef::Xid(_) => {}
-            xcbdefs::TypeRef::XidUnion(_) => {}
-            xcbdefs::TypeRef::Enum(_) => {}
+            xcbdefs::TypeRef::Xid(_)
+            | xcbdefs::TypeRef::XidUnion(_)
+            | xcbdefs::TypeRef::Enum(_) => {}
             xcbdefs::TypeRef::Alias(type_alias_def) => {
                 let type_alias_def = type_alias_def.upgrade().unwrap();
-                self.filter_derives_for_type(derives, type_alias_def.old_name.get_resolved())
+                self.filter_derives_for_type(derives, type_alias_def.old_name.get_resolved());
             }
         }
     }
+}
 
-    /// Whether the field is visible (i.e., appears in parsed rust structs)
-    fn field_is_visible(
-        &self,
-        field: &xcbdefs::FieldDef,
-        deducible_fields: &HashMap<String, DeducibleField>,
-    ) -> bool {
-        match field {
-            xcbdefs::FieldDef::Pad(_) => false,
-            xcbdefs::FieldDef::Normal(normal_field) => {
-                !deducible_fields.contains_key(&normal_field.name)
+fn use_enum_type_in_field(type_: &xcbdefs::FieldValueType) -> Option<Rc<xcbdefs::EnumDef>> {
+    if let xcbdefs::FieldValueSet::Enum(ref enum_) = type_.value_set {
+        let enum_def = match enum_.get_resolved() {
+            xcbdefs::TypeRef::Enum(enum_def) => enum_def.upgrade().unwrap(),
+            _ => unreachable!(),
+        };
+        Some(enum_def)
+    } else {
+        None
+    }
+}
+
+fn rust_value_type_is_u8(type_: &xcbdefs::FieldValueType) -> bool {
+    if use_enum_type_in_field(type_).is_some() {
+        false
+    } else {
+        let original_type = match type_.type_.get_resolved() {
+            xcbdefs::TypeRef::Alias(type_alias_def) => {
+                type_alias_def.upgrade().unwrap().get_original_type()
             }
-            xcbdefs::FieldDef::List(_) => true,
-            xcbdefs::FieldDef::Switch(_) => true,
-            xcbdefs::FieldDef::Fd(_) => true,
-            xcbdefs::FieldDef::FdList(_) => true,
-            xcbdefs::FieldDef::Expr(_) => false,
-            xcbdefs::FieldDef::VirtualLen(_) => false,
+            type_ => type_.clone(),
+        };
+        matches!(
+            original_type,
+            xcbdefs::TypeRef::BuiltIn(
+                xcbdefs::BuiltInType::Card8
+                    | xcbdefs::BuiltInType::Byte
+                    | xcbdefs::BuiltInType::Char
+                    | xcbdefs::BuiltInType::Void
+            )
+        )
+    }
+}
+fn emit_doc(
+    doc: &xcbdefs::Doc,
+    out: &mut Output,
+    deducible_fields: Option<&HashMap<String, DeducibleField>>,
+) {
+    let mut has_doc = false;
+    if let Some(ref brief) = doc.brief {
+        outln!(out, "/// {}.", brief);
+        has_doc = true;
+    }
+    if let Some(ref description) = doc.description {
+        if has_doc {
+            outln!(out, "///");
         }
+        has_doc = true;
+        for line in description.trim().split('\n') {
+            if line.trim().is_empty() {
+                outln!(out, "///");
+            } else {
+                outln!(out, "/// {}", line.trim_end());
+            }
+        }
+    }
+    if !doc.fields.is_empty() {
+        if has_doc {
+            outln!(out, "///");
+        }
+        has_doc = true;
+        outln!(out, "/// # Fields");
+        outln!(out, "///");
+        for field in &doc.fields {
+            if deducible_fields.map_or(false, |deducible_fields| {
+                deducible_fields.contains_key(&field.name)
+            }) {
+                continue;
+            }
+            let text = format!(
+                " * `{}` - {}",
+                field.name,
+                field.doc.as_deref().unwrap_or("").trim(),
+            );
+            // Prevent rustdoc interpreting many leading spaces as code examples (?)
+            for line in text.trim().split('\n') {
+                let line = line.trim();
+                if line.trim().is_empty() {
+                    outln!(out, "///");
+                } else {
+                    outln!(out, "/// {}", line);
+                }
+            }
+        }
+    }
+    if !doc.errors.is_empty() {
+        if has_doc {
+            outln!(out, "///");
+        }
+        has_doc = true;
+        outln!(out, "/// # Errors");
+        outln!(out, "///");
+        for error in &doc.errors {
+            let text = format!(
+                "* `{}` - {}",
+                error.type_,
+                error.doc.as_deref().unwrap_or("").trim(),
+            );
+            for line in text.split('\n') {
+                outln!(out, "/// {}", line.trim_end());
+            }
+        }
+    }
+    if !doc.sees.is_empty() {
+        if has_doc {
+            outln!(out, "///");
+        }
+        has_doc = true;
+        outln!(out, "/// # See");
+        outln!(out, "///");
+        for see in &doc.sees {
+            outln!(out, "/// * `{}`: {}", see.name, see.type_);
+        }
+    }
+    if let Some(ref example) = doc.example {
+        if has_doc {
+            outln!(out, "///");
+        }
+        has_doc = true;
+        outln!(out, "/// # Example");
+        outln!(out, "///");
+        outln!(out, "/// ```text");
+        for line in example.trim().split('\n') {
+            if line.trim().is_empty() {
+                outln!(out, "///");
+            } else {
+                outln!(out, "/// {}", line.trim_end());
+            }
+        }
+        outln!(out, "/// ```");
+    }
+    // Empty doc?
+    assert!(has_doc);
+}
+fn ext_params_to_call_args(
+    begin_with_comma: bool,
+    mut wrap_name: impl FnMut(&str) -> String,
+    ext_params: &[xcbdefs::ExternalParam],
+) -> String {
+    let mut s = String::new();
+    for (i, ext_param) in ext_params.iter().enumerate() {
+        if i != 0 || begin_with_comma {
+            s.push_str(", ");
+        }
+        s.push_str(&wrap_name(&ext_param.name));
+    }
+    s
+}
+
+/// Returns the parameters needed by the `try_parse` function for `type_`.
+fn get_type_parse_params(type_: &xcbdefs::TypeRef, remaining: &str) -> Vec<String> {
+    let mut params = vec![String::from(remaining)];
+
+    let original_type = if let xcbdefs::TypeRef::Alias(type_alias_def) = type_ {
+        type_alias_def.upgrade().unwrap().get_original_type()
+    } else {
+        type_.clone()
+    };
+
+    if let xcbdefs::TypeRef::Struct(struct_def) = original_type {
+        let struct_def = struct_def.upgrade().unwrap();
+        for ext_param in struct_def.external_params.borrow().iter() {
+            params.push(to_rust_variable_name(&ext_param.name));
+        }
+    }
+
+    params
+}
+
+/// Whether the field is visible (i.e., appears in parsed rust structs)
+fn field_is_visible(
+    field: &xcbdefs::FieldDef,
+    deducible_fields: &HashMap<String, DeducibleField>,
+) -> bool {
+    match field {
+        xcbdefs::FieldDef::Normal(normal_field) => {
+            !deducible_fields.contains_key(&normal_field.name)
+        }
+        xcbdefs::FieldDef::List(_)
+        | xcbdefs::FieldDef::Switch(_)
+        | xcbdefs::FieldDef::Fd(_)
+        | xcbdefs::FieldDef::FdList(_) => true,
+        xcbdefs::FieldDef::Expr(_)
+        | xcbdefs::FieldDef::Pad(_)
+        | xcbdefs::FieldDef::VirtualLen(_) => false,
     }
 }

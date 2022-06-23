@@ -75,7 +75,7 @@ impl NestingChecker {
         let union_def_ptr: *const defs::UnionDef = &*union_def;
         if self.checked.insert(union_def_ptr as usize) {
             // Not checked yet
-            for field in union_def.fields.iter() {
+            for field in &union_def.fields {
                 self.check_field(field)?;
             }
         }
@@ -85,7 +85,6 @@ impl NestingChecker {
 
     fn check_field(&mut self, field: &defs::FieldDef) -> Result<(), ResolveError> {
         match field {
-            defs::FieldDef::Pad(_) => Ok(()),
             defs::FieldDef::Normal(normal_field) => {
                 self.check_field_value_type(&normal_field.type_)?;
                 Ok(())
@@ -95,17 +94,18 @@ impl NestingChecker {
                 Ok(())
             }
             defs::FieldDef::Switch(switch_field) => {
-                for case in switch_field.cases.iter() {
+                for case in &switch_field.cases {
                     for case_field in case.fields.borrow().iter() {
                         self.check_field(case_field)?;
                     }
                 }
                 Ok(())
             }
-            defs::FieldDef::Fd(_) => Ok(()),
-            defs::FieldDef::FdList(_) => Ok(()),
-            defs::FieldDef::Expr(_) => Ok(()),
-            defs::FieldDef::VirtualLen(_) => Ok(()),
+            defs::FieldDef::Fd(_)
+            | defs::FieldDef::FdList(_)
+            | defs::FieldDef::Expr(_)
+            | defs::FieldDef::Pad(_)
+            | defs::FieldDef::VirtualLen(_) => Ok(()),
         }
     }
 

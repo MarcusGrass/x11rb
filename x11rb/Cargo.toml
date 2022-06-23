@@ -1,6 +1,6 @@
 [package]
 name = "x11rb"
-version = "0.10.1"
+version = "0.10.0"
 description = "Rust bindings to X11"
 authors = [
     "Uli Schlachter <psychon@znc.in>",
@@ -9,7 +9,7 @@ authors = [
 ]
 repository = "https://github.com/psychon/x11rb"
 readme = "../README.md"
-edition = "2018"
+edition = "2021"
 license = "MIT OR Apache-2.0"
 keywords = ["xcb", "X11"]
 exclude = [
@@ -20,44 +20,17 @@ exclude = [
 ]
 
 [dependencies]
-x11rb-protocol = { version = "0.10.0", path = "../x11rb-protocol" }
-libc = { version = "0.2", optional = true }
-libloading = { version = "0.7.0", optional = true }
-once_cell = { version = "1.8.0", optional = true }
-gethostname = "0.2.1"
-
-[target.'cfg(unix)'.dependencies.nix]
-version = "0.24"
-default-features = false
-features = ["socket", "uio", "poll"]
-
-[target.'cfg(windows)'.dependencies]
-winapi-wsapoll = "0.1.1"
-
-[target.'cfg(windows)'.dependencies.winapi]
-version = "0.3"
-features = ["winsock2"]
+nix = { version = "0.24.1", default-features = false, features = ["socket", "uio", "poll"] }
+heapless = { version = "0.7.14", default-features = false }
 
 [features]
-# Without this feature, all uses of `unsafe` in the crate are forbidden via
-# #![deny(unsafe_code)]. This has the effect of disabling the XCB FFI bindings.
-allow-unsafe-code = ["libc"]
-
+default = []
+debug = []
 # Enable utility functions in `x11rb::cursor` for loading mouse cursors.
-cursor = ["render", "resource_manager"]
-
-# Enable utility functions in `x11rb::image` for working with image data.
-image = []
-
-# Enable utility functions in `x11rb::resource_manager` for querying the
-# resource databases.
-resource_manager = ["x11rb-protocol/resource_manager"]
-
-dl-libxcb = ["allow-unsafe-code", "libloading", "once_cell"]
+cursor = ["render"]
 
 # Enable this feature to enable all the X11 extensions
 all-extensions = [
-    "x11rb-protocol/all-extensions",
     "composite",
     "damage",
     "dpms",
@@ -88,33 +61,33 @@ all-extensions = [
 ]
 
 # Features to enable individual X11 extensions
-composite = ["x11rb-protocol/composite", "xfixes"]
-damage = ["x11rb-protocol/damage", "xfixes"]
-dpms = ["x11rb-protocol/dpms"]
-dri2 = ["x11rb-protocol/dri2"]
-dri3 = ["x11rb-protocol/dri3"]
-glx = ["x11rb-protocol/glx"]
-present = ["x11rb-protocol/present", "randr", "xfixes", "sync"]
-randr = ["x11rb-protocol/randr", "render"]
-record = ["x11rb-protocol/record"]
-render = ["x11rb-protocol/render"]
-res = ["x11rb-protocol/res"]
-screensaver = ["x11rb-protocol/screensaver"]
-shape = ["x11rb-protocol/shape"]
-shm = ["x11rb-protocol/shm"]
-sync = ["x11rb-protocol/sync"]
-xevie = ["x11rb-protocol/xevie"]
-xf86dri = ["x11rb-protocol/xf86dri"]
-xf86vidmode = ["x11rb-protocol/xf86vidmode"]
-xfixes = ["x11rb-protocol/xfixes", "render", "shape"]
-xinerama = ["x11rb-protocol/xinerama"]
-xinput = ["x11rb-protocol/xinput", "xfixes"]
-xkb = ["x11rb-protocol/xkb"]
-xprint = ["x11rb-protocol/xprint"]
-xselinux = ["x11rb-protocol/xselinux"]
-xtest = ["x11rb-protocol/xtest"]
-xv = ["x11rb-protocol/xv", "shm"]
-xvmc = ["x11rb-protocol/xvmc", "xv"]
+composite = ["xfixes"]
+damage = ["xfixes"]
+dpms = []
+dri2 = []
+dri3 = []
+glx = []
+present = ["randr", "xfixes", "sync"]
+randr = ["render"]
+record = []
+render = []
+res = []
+screensaver = []
+shape = []
+shm = []
+sync = []
+xevie = []
+xf86dri = []
+xf86vidmode = []
+xfixes = ["render", "shape"]
+xinerama = []
+xinput = ["xfixes"]
+xkb = []
+xprint = []
+xselinux = []
+xtest = []
+xv = ["shm"]
+xvmc = ["xv"]
 
 [package.metadata.docs.rs]
 features = [
@@ -125,27 +98,3 @@ features = [
     "image",
     "resource_manager",
 ]
-
-[[example]]
-name = "generic_events"
-required-features = ["present"]
-
-[[example]]
-name = "shared_memory"
-required-features = ["libc", "shm"]
-
-[[example]]
-name = "xeyes"
-required-features = ["shape"]
-
-[[example]]
-name = "simple_window"
-required-features = ["cursor", "resource_manager"]
-
-[[example]]
-name = "display_ppm"
-required-features = ["image"]
-
-[[example]]
-name = "record"
-required-features = ["record"]

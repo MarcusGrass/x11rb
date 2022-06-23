@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::convert::TryFrom;
 
+use crate::generator::namespace::ext_params_to_call_args;
 use xcbgen::defs as xcbdefs;
 
 use super::{
-    expr_to_str, parse, postfix_var_name, to_rust_variable_name, DeducibleField,
-    NamespaceGenerator, Output,
+    expr_to_str, parse, postfix_var_name, rust_value_type_is_u8, to_rust_variable_name,
+    use_enum_type_in_field, DeducibleField, NamespaceGenerator, Output,
 };
 
 /// Returns `Some(bytes)` if the serialized result is a single
@@ -70,7 +71,7 @@ pub(super) fn emit_field_serialize(
         }
         xcbdefs::FieldDef::List(list_field) => {
             let list_length = list_field.length().unwrap();
-            if generator.rust_value_type_is_u8(&list_field.element_type) {
+            if rust_value_type_is_u8(&list_field.element_type) {
                 // Fixed-sized list with `u8` members
                 for i in 0..list_length {
                     result_bytes.push(format!("{}[{}]", wrap_field_ref(&list_field.name), i));
@@ -190,7 +191,7 @@ pub(super) fn emit_field_serialize_into(
             }
         }
         xcbdefs::FieldDef::List(list_field) => {
-            if generator.rust_value_type_is_u8(&list_field.element_type) {
+            if rust_value_type_is_u8(&list_field.element_type) {
                 // Fixed-sized list with `u8` members
                 outln!(
                     out,
@@ -198,7 +199,7 @@ pub(super) fn emit_field_serialize_into(
                     bytes_name,
                     wrap_field_ref(&list_field.name),
                 );
-            } else if parse::can_use_simple_list_parsing(generator, &list_field.element_type) {
+            } else if parse::can_use_simple_list_parsing(&list_field.element_type) {
                 outln!(
                     out,
                     "{}.serialize_into({});",
@@ -225,7 +226,7 @@ pub(super) fn emit_field_serialize_into(
             }
         }
         xcbdefs::FieldDef::Switch(switch_field) => {
-            let ext_params_args = generator.ext_params_to_call_args(
+            let ext_params_args = ext_params_to_call_args(
                 true,
                 to_rust_variable_name,
                 &*switch_field.external_params.borrow(),
@@ -253,16 +254,20 @@ pub(super) fn emit_assert_for_field_serialize(
     out: &mut Output,
 ) {
     match field {
-        xcbdefs::FieldDef::Pad(_) => {}
-        xcbdefs::FieldDef::Normal(_) => {}
+        xcbdefs::FieldDef::Normal(_)
+        | xcbdefs::FieldDef::Fd(_)
+        | xcbdefs::FieldDef::Expr(_)
+        | xcbdefs::FieldDef::Pad(_)
+        | xcbdefs::FieldDef::VirtualLen(_)
+        | xcbdefs::FieldDef::Switch(_) => {}
         xcbdefs::FieldDef::List(list_field) => {
             let needs_assert =
                 !deducible_fields
                     .values()
                     .any(|deducible_field| match deducible_field {
                         DeducibleField::LengthOf(list_name, _) => *list_name == list_field.name,
-                        DeducibleField::CaseSwitchExpr(_, _) => false,
-                        DeducibleField::BitCaseSwitchExpr(_, _) => false,
+                        DeducibleField::CaseSwitchExpr(_, _)
+                        | DeducibleField::BitCaseSwitchExpr(_, _) => false,
                     })
                     && list_field.length_expr.is_some()
                     && list_field.length().is_none();
@@ -279,7 +284,7 @@ pub(super) fn emit_assert_for_field_serialize(
                 );
                 outln!(
                     out,
-                    "assert_eq!({}.len(), usize::try_from({}).unwrap(), \"`{}` has an \
+                    "debug_assert_eq!({}.len(), usize::try_from({}).unwrap(), \"`{}` has an \
                      incorrect length\");",
                     wrap_field_ref(&list_field.name),
                     length_expr_str,
@@ -287,16 +292,14 @@ pub(super) fn emit_assert_for_field_serialize(
                 );
             }
         }
-        xcbdefs::FieldDef::Switch(_) => {}
-        xcbdefs::FieldDef::Fd(_) => {}
         xcbdefs::FieldDef::FdList(fd_list_field) => {
             let needs_assert =
                 !deducible_fields
                     .values()
                     .any(|deducible_field| match deducible_field {
                         DeducibleField::LengthOf(list_name, _) => *list_name == fd_list_field.name,
-                        DeducibleField::CaseSwitchExpr(_, _) => false,
-                        DeducibleField::BitCaseSwitchExpr(_, _) => false,
+                        DeducibleField::CaseSwitchExpr(_, _)
+                        | DeducibleField::BitCaseSwitchExpr(_, _) => false,
                     })
                     && fd_list_field.length().is_none();
 
@@ -312,7 +315,7 @@ pub(super) fn emit_assert_for_field_serialize(
                 );
                 outln!(
                     out,
-                    "assert_eq!({}.len(), usize::try_from({}).unwrap(), \"`{}` has an \
+                    "debug_assert_eq!({}.len(), usize::try_from({}).unwrap(), \"`{}` has an \
                      incorrect length\");",
                     wrap_field_ref(&fd_list_field.name),
                     length_expr_str,
@@ -320,8 +323,6 @@ pub(super) fn emit_assert_for_field_serialize(
                 );
             }
         }
-        xcbdefs::FieldDef::Expr(_) => {}
-        xcbdefs::FieldDef::VirtualLen(_) => {}
     }
 }
 
@@ -343,7 +344,7 @@ pub(super) fn emit_assert_for_switch_serialize(
     );
     outln!(
         out,
-        "assert_eq!(self.switch_expr(), {}, \"switch `{}` has an inconsistent discriminant\");",
+        "debug_assert_eq!(self.switch_expr(), {}, \"switch `{}` has an inconsistent discriminant\");",
         switch_expr_str,
         rust_field_name,
     );
@@ -356,7 +357,7 @@ pub(super) fn emit_value_serialize(
     was_deduced: bool,
 ) -> String {
     // Deduced fields are not converted to their enum value
-    if let (false, Some(enum_def)) = (was_deduced, generator.use_enum_type_in_field(type_)) {
+    if let (false, Some(enum_def)) = (was_deduced, use_enum_type_in_field(type_)) {
         let enum_info = generator.caches.borrow().enum_info(&enum_def);
         let (_, max_wire_size) = enum_info.wire_size.unwrap();
         let rust_wire_type = generator.type_to_rust_type(type_.type_.get_resolved());
@@ -384,7 +385,7 @@ pub(super) fn emit_value_serialize_into(
     out: &mut Output,
 ) {
     // Deduced fields are not converted to their enum value
-    if let (false, Some(enum_def)) = (was_deduced, generator.use_enum_type_in_field(type_)) {
+    if let (false, Some(enum_def)) = (was_deduced, use_enum_type_in_field(type_)) {
         let enum_info = generator.caches.borrow().enum_info(&enum_def);
         let (_, max_wire_size) = enum_info.wire_size.unwrap();
         let rust_wire_type = generator.type_to_rust_type(type_.type_.get_resolved());

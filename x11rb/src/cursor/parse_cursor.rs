@@ -62,6 +62,12 @@ pub(crate) struct Image {
 impl Image {
     /// Read an `Image` from a reader
     fn read<R: Read>(read: &mut R, expected_kind: u32, expected_size: u32) -> Result<Self, Error> {
+        fn convert_size(size: u32) -> Result<u16, Error> {
+            size.try_into()
+                .ok()
+                .filter(|&size| size <= IMAGE_MAX_SIZE)
+                .ok_or(Error::ImageTooLarge)
+        }
         let (_header, kind, size, _version) = (
             read_u32(read)?,
             read_u32(read)?,
@@ -70,13 +76,6 @@ impl Image {
         );
         if (kind, size) != (expected_kind, expected_size) {
             return Err(Error::CorruptImage);
-        }
-
-        fn convert_size(size: u32) -> Result<u16, Error> {
-            size.try_into()
-                .ok()
-                .filter(|&size| size <= IMAGE_MAX_SIZE)
-                .ok_or(Error::ImageTooLarge)
         }
 
         let (width, height) = (
@@ -140,7 +139,7 @@ fn find_best_size(toc: &[TocEntry], desired_size: u32) -> Result<u32, Error> {
     for entry in toc {
         // If this is better than the best so far, replace best
         if entry.kind == IMAGE_TYPE && is_better(desired_size, entry, &result) {
-            result = Ok(entry.size)
+            result = Ok(entry.size);
         }
     }
     result

@@ -1,99 +1,153 @@
-//! Utility functions that are not specific to X11.
-//!
-//! # CSlice
-//!
-//! [`CSlice`] is a wrapper around some bytes in memory. It is unsafe to construct, but takes
-//! ownership of the bytes and allows accessing them as a `[u8]`. When dropped, the underlying
-//! memory is freed via [`libc::free`].
-//!
-//! `CSlice` is only available when the `allow-unsafe-code` feature is enabled.
+#[macro_export]
+#[cfg(feature = "debug")]
+macro_rules! debug {
+    ($($arg:tt)*) => {{
+        eprintln!("[{}:L#{}] {}", file!(), line!(), format_args!($($arg)*));
+    }}
+}
+#[macro_export]
+#[cfg(not(feature = "debug"))]
+macro_rules! debug {
+    ($($arg:tt)*) => {{}};
+}
+mod pretty_printer {
+    use core::fmt::{Debug, Formatter, Result};
 
-pub use x11rb_protocol::RawFdContainer;
-
-#[cfg(feature = "allow-unsafe-code")]
-mod unsafe_code {
-    use std::mem::forget;
-    use std::ops::{Deref, Index};
-    use std::ptr::NonNull;
-    use std::slice::{from_raw_parts, SliceIndex};
-
-    use libc::free;
-
-    /// Wrapper around a slice that was allocated in C code.
+    /// A helper to pretty-print an enumeration value.
     ///
-    /// `CSlice` is only available when the `allow-unsafe-code` feature is enabled.
-    pub struct CSlice {
-        ptr: NonNull<[u8]>,
+    /// This function prints the given number. If it matches one of the provided variants, that
+    /// match is used. Otherwise, the number is printed as a decimal.
+    ///
+    /// In alternate mode, the second string in the given array is used, else the first.
+    pub(crate) fn pretty_print_enum(
+        fmt: &mut Formatter<'_>,
+        value: u32,
+        cases: &[(u32, &str, &str)],
+    ) -> Result {
+        for (variant, name1, name2) in cases {
+            if &value == variant {
+                return if fmt.alternate() {
+                    fmt.write_str(name2)
+                } else {
+                    fmt.write_str(name1)
+                };
+            }
+        }
+        Debug::fmt(&value, fmt)
     }
 
-    // `CSlice` is `Send` and `Sync` because, once created, it is
-    // completely immutable (it does not have interior mutability),
-    // so it can be safely accessed from different threads simultaneously.
-    unsafe impl Send for CSlice {}
-    unsafe impl Sync for CSlice {}
+    /// A helper to pretty-print a bitmask.
+    ///
+    /// This function prints the given number. All bit-matches with the given variants are printed.
+    /// Any left-over number is printed as a decimal.
+    ///
+    /// In alternate mode, the second string in the given array is used, else the first.
+    pub(crate) fn pretty_print_bitmask(
+        fmt: &mut Formatter<'_>,
+        value: u32,
+        cases: &[(u32, &str, &str)],
+    ) -> Result {
+        // First, figure out if there are any bits not covered by any case
+        let known_bits = cases.iter().fold(0, |acc, (value, _, _)| acc | value);
+        let remaining = value & !known_bits;
+        let mut already_printed = if value == 0 || remaining != 0 {
+            Debug::fmt(&remaining, fmt)?;
+            true
+        } else {
+            false
+        };
+        for (variant, name1, name2) in cases {
+            if variant & value != 0 {
+                if already_printed {
+                    fmt.write_str(" | ")?;
+                }
+                already_printed = true;
+                if fmt.alternate() {
+                    fmt.write_str(name2)?;
+                } else {
+                    fmt.write_str(name1)?;
+                }
+            }
+        }
+        Ok(())
+    }
 
-    impl CSlice {
-        /// Constructs a new `CSlice` from the given parts. `libc::free` will be called on the given
-        /// pointer when the slice is dropped.
-        ///
-        /// # Safety
-        ///
-        /// The same rules as for `std::slice::from_raw_parts` apply. Additionally, the given pointer
-        /// must be safe to free with `libc::free`.
-        pub unsafe fn new(ptr: *const u8, len: usize) -> CSlice {
-            CSlice {
-                ptr: NonNull::from(from_raw_parts(ptr, len)),
+    #[cfg(test)]
+    mod test {
+        use super::{pretty_print_bitmask, pretty_print_enum};
+        use core::fmt::{Display, Formatter, Result};
+
+        type CallbackType = fn(&mut Formatter<'_>, u32, &[(u32, &str, &str)]) -> Result;
+
+        struct CallbackFormating<'a, 'b> {
+            callback: CallbackType,
+            value: u32,
+            cases: &'a [(u32, &'b str, &'b str)],
+        }
+
+        fn new_enum<'a, 'b>(
+            value: u32,
+            cases: &'a [(u32, &'b str, &'b str)],
+        ) -> CallbackFormating<'a, 'b> {
+            CallbackFormating {
+                callback: pretty_print_enum,
+                value,
+                cases,
             }
         }
 
-        /// Convert `self` into a raw part.
-        ///
-        /// Ownership of the returned pointer is given to the caller. Specifically, `libc::free` will
-        /// not be called on it by `CSlice`.
-        pub fn into_ptr(self) -> *const u8 {
-            let ptr = self.ptr.as_ptr() as *const u8;
-            forget(self);
-            ptr
+        fn new_bitmask<'a, 'b>(
+            value: u32,
+            cases: &'a [(u32, &'b str, &'b str)],
+        ) -> CallbackFormating<'a, 'b> {
+            CallbackFormating {
+                callback: pretty_print_bitmask,
+                value,
+                cases,
+            }
         }
-    }
 
-    impl Drop for CSlice {
-        fn drop(&mut self) {
-            unsafe { free(self.ptr.as_ptr() as _) }
+        impl Display for CallbackFormating<'_, '_> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+                (self.callback)(f, self.value, self.cases)
+            }
         }
-    }
 
-    impl Deref for CSlice {
-        type Target = [u8];
-
-        fn deref(&self) -> &[u8] {
-            unsafe { self.ptr.as_ref() }
+        #[test]
+        fn test_enum() {
+            let cases = [(0, "zero", "ZERO"), (42, "the answer", "ANSWER")];
+            let printer = new_enum(0, &cases);
+            assert_eq!(&format!("{}", printer), "zero");
+            assert_eq!(&format!("{:#}", printer), "ZERO");
+            let printer = new_enum(1, &cases);
+            assert_eq!(&format!("{}", printer), "1");
+            assert_eq!(&format!("{:#}", printer), "1");
+            let printer = new_enum(42, &cases);
+            assert_eq!(&format!("{}", printer), "the answer");
+            assert_eq!(&format!("{:#}", printer), "ANSWER");
         }
-    }
 
-    impl AsRef<[u8]> for CSlice {
-        fn as_ref(&self) -> &[u8] {
-            &**self
-        }
-    }
-
-    impl<I> Index<I> for CSlice
-    where
-        I: SliceIndex<[u8]>,
-    {
-        type Output = I::Output;
-
-        fn index(&self, index: I) -> &I::Output {
-            (**self).index(index)
-        }
-    }
-
-    impl std::fmt::Debug for CSlice {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            std::fmt::Debug::fmt(&**self, f)
+        #[test]
+        fn test_bitmask() {
+            let bits = [
+                (1 << 5, "b5", "B5"),
+                (1 << 1, "b1", "B1"),
+                (1 << 0, "unused", "UNUSED"),
+            ];
+            let printer = new_bitmask(8, &bits);
+            assert_eq!(&format!("{}", printer), "8");
+            assert_eq!(&format!("{:#}", printer), "8");
+            let printer = new_bitmask(32, &bits);
+            assert_eq!(&format!("{}", printer), "b5");
+            assert_eq!(&format!("{:#}", printer), "B5");
+            let printer = new_bitmask(34, &bits);
+            assert_eq!(&format!("{}", printer), "b5 | b1");
+            assert_eq!(&format!("{:#}", printer), "B5 | B1");
+            let printer = new_bitmask(42, &bits);
+            assert_eq!(&format!("{}", printer), "8 | b5 | b1");
+            assert_eq!(&format!("{:#}", printer), "8 | B5 | B1");
         }
     }
 }
 
-#[cfg(feature = "allow-unsafe-code")]
-pub use unsafe_code::CSlice;
+pub(crate) use pretty_printer::{pretty_print_bitmask, pretty_print_enum};

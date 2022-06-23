@@ -8,6 +8,7 @@
     unused_qualifications
 )]
 #![forbid(unsafe_code)]
+#![allow(clippy::doc_markdown, clippy::similar_names)]
 
 use std::path::{Path, PathBuf};
 
@@ -129,7 +130,7 @@ fn main2() -> Result<u8, Error> {
     let xml_files = list_xmls(input_dir_path)?;
     let module = xcbgen::defs::Module::new();
     let mut parser = xcbgen::Parser::new(module.clone());
-    for file_path in xml_files.iter() {
+    for file_path in &xml_files {
         println!("Loading {:?}", file_path);
         load_namespace(file_path, &mut parser)?;
     }
@@ -141,7 +142,7 @@ fn main2() -> Result<u8, Error> {
     println!("Resolved successfully");
 
     let generated = generator::generate(&module);
-    for generated in generated.iter() {
+    for generated in &generated {
         let mut proto_file_path = PathBuf::from(proto_output_dir_path);
         let mut x11rb_file_path = PathBuf::from(x11rb_output_dir_path);
         proto_file_path.push(&generated.file_name);

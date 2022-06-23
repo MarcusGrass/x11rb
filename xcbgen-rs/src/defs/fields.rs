@@ -58,12 +58,9 @@ impl FieldDef {
     /// * For virtual length fields, this returns the type of the length, which is a `CARD32`.
     pub fn value_type(&self) -> Option<&FieldValueType> {
         match self {
-            Self::Pad(_) => None,
             Self::Normal(normal_field) => Some(&normal_field.type_),
             Self::List(list_field) => Some(&list_field.element_type),
-            Self::Switch(_) => None,
-            Self::Fd(_) => None,
-            Self::FdList(_) => None,
+            Self::Switch(_) | Self::FdList(_) | Self::Pad(_) | Self::Fd(_) => None,
             Self::Expr(expr_field) => Some(&expr_field.type_),
             Self::VirtualLen(virtual_len_field) => Some(&virtual_len_field.type_),
         }
@@ -86,11 +83,8 @@ impl FieldDef {
             }
             Self::Switch(switch_field) => switch_field.size(),
             // fds are not serialized, they are sent with fd passing
-            Self::Fd(_) => Some(0),
-            Self::FdList(_) => Some(0),
+            Self::Fd(_) | Self::FdList(_) | Self::VirtualLen(_) => Some(0),
             Self::Expr(expr_field) => expr_field.type_.size(),
-            // not serialized
-            Self::VirtualLen(_) => Some(0),
         }
     }
 }
@@ -195,7 +189,7 @@ impl SwitchField {
         }
 
         let mut size = None;
-        for case in self.cases.iter() {
+        for case in &self.cases {
             let case_size = case.size()?;
             if let Some(size) = size {
                 if size != case_size {
@@ -443,22 +437,13 @@ pub enum BuiltInType {
 
 impl BuiltInType {
     /// Get the size in bytes of this type on the wire.
+    #[must_use]
     pub fn size(self) -> u32 {
         match self {
-            Self::Card8 => 1,
-            Self::Card16 => 2,
-            Self::Card32 => 4,
-            Self::Card64 => 8,
-            Self::Int8 => 1,
-            Self::Int16 => 2,
-            Self::Int32 => 4,
-            Self::Int64 => 8,
-            Self::Byte => 1,
-            Self::Bool => 1,
-            Self::Char => 1,
-            Self::Float => 4,
-            Self::Double => 8,
-            Self::Void => 1,
+            Self::Card16 | Self::Int16 => 2,
+            Self::Card32 | Self::Float | Self::Int32 => 4,
+            Self::Card64 | Self::Int64 | Self::Double => 8,
+            Self::Int8 | Self::Void | Self::Char | Self::Card8 | Self::Bool | Self::Byte => 1,
         }
     }
 }

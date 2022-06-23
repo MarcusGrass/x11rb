@@ -29,7 +29,7 @@ pub(super) fn handle_request(request_def: &xcbdefs::RequestDef, out: &mut Output
 /// Successfully iterate over the value:
 /// ```
 /// // First, we have to 'invent' a GetPropertyReply.
-/// let reply = x11rb_protocol::protocol::xproto::GetPropertyReply {{
+/// let reply = xcb_connection::protocol::xproto::GetPropertyReply {{
 ///     format: {},
 ///     sequence: 0,
 ///     length: 0, // This value is incorrect
@@ -45,18 +45,18 @@ pub(super) fn handle_request(request_def: &xcbdefs::RequestDef, out: &mut Output
                     example_value = example_value[i],
                 );
                 for expect in example_expected[i].iter() {
-                    outln!(out, "/// assert_eq!(iter.next(), Some({}));", expect)
+                    outln!(out, "/// debug_assert_eq!(iter.next(), Some({}));", expect);
                 }
                 outln!(
                     out,
-                    r"/// assert_eq!(iter.next(), None);
+                    r"/// debug_assert_eq!(iter.next(), None);
 /// ```
 ///
 /// An iterator is only returned when the `format` is correct.
 /// The following example shows this.
 /// ```
 /// // First, we have to 'invent' a GetPropertyReply.
-/// let reply = x11rb_protocol::protocol::xproto::GetPropertyReply {{
+/// let reply = xcb_connection::protocol::xproto::GetPropertyReply {{
 ///     format: 42, // Not allowed in X11, but used for the example
 ///     sequence: 0,
 ///     length: 0, // This value is incorrect
@@ -67,6 +67,7 @@ pub(super) fn handle_request(request_def: &xcbdefs::RequestDef, out: &mut Output
 /// }};
 /// assert!(reply.value{width}().is_none());
 /// ```
+#[must_use]
 pub fn value{width}(&self) -> Option<impl Iterator<Item=u{width}> + '_> {{
     if self.format == {width} {{
         Some(crate::wrapper::PropertyIterator::new(&self.value))
@@ -100,11 +101,12 @@ pub(super) fn handle_request_switch(
 /// This function construct a new `ConfigureWindowAux` instance by accepting all requested
 /// changes from a `ConfigureRequestEvent`. This function is useful for window managers that want
 /// to handle `ConfigureRequestEvent`s.
+#[must_use]
 pub fn from_configure_request(event: &ConfigureRequestEvent) -> Self {{
     let mut result = Self::new();"
             );
             out.indented(|out| {
-                for case in switch_field.cases.iter() {
+                for case in &switch_field.cases {
                     let fields = case.fields.borrow();
                     assert_eq!(1, fields.len());
                     let field = match &fields[0] {

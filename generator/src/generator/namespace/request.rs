@@ -1,10 +1,12 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 
 use super::{
-    expr_to_str, gather_deducible_fields, get_ns_name_prefix, parse, serialize, special_cases,
-    struct_type, switch, to_rust_type_name, to_rust_variable_name, CaseInfo, DeducibleField,
-    Derives, FieldContainer, NamespaceGenerator, Output, PerModuleEnumCases, StructSizeConstraint,
+    emit_doc, expr_to_str, ext_params_to_call_args, field_is_visible, gather_deducible_fields,
+    get_ns_name_prefix, parse, rust_value_type_is_u8, serialize, special_cases, struct_type,
+    switch, to_rust_type_name, to_rust_variable_name, CaseInfo, DeducibleField, Derives,
+    NamespaceGenerator, Output, PerModuleEnumCases, StructSizeConstraint,
 };
 
 use xcbgen::defs as xcbdefs;
@@ -34,22 +36,6 @@ enum Type {
 }
 
 impl Type {
-    /// Does this type need a Cow::Owned?
-    fn needs_owned_cow(&self) -> bool {
-        match self {
-            Type::Simple(_) | Type::VariableOwnershipRawBytes(_) => false,
-            Type::VariableOwnership(_) => true,
-        }
-    }
-
-    /// Does this type need a Cow::Borrowed?
-    fn needs_borrowed_cow(&self) -> bool {
-        match self {
-            Type::Simple(_) | Type::VariableOwnership(_) => false,
-            Type::VariableOwnershipRawBytes(_) => true,
-        }
-    }
-
     /// Does this type need a Cow?
     fn needs_any_cow(&self) -> bool {
         match self {
@@ -81,7 +67,6 @@ impl Type {
 
 /// Some information about the fields of a request.
 struct GatheredRequestFields {
-    reply_has_fds: bool,
     /// Whether lifetimes in the request need to be explicitly
     /// specified. If a request function takes any other
     /// references other than the connection object, we'll need
@@ -100,17 +85,6 @@ struct GatheredRequestFields {
     generics: Vec<(String, String)>,
     /// Code at the beginning of the function.
     preamble: Vec<String>,
-    /// Single FD fields
-    single_fds: Vec<String>,
-    /// FD list fields
-    fd_lists: Vec<String>,
-}
-
-impl GatheredRequestFields {
-    /// Does the request have fds in it?
-    fn has_fds(&self) -> bool {
-        !self.single_fds.is_empty() || !self.fd_lists.is_empty()
-    }
 }
 
 pub(super) fn generate_request(
@@ -167,7 +141,12 @@ pub(super) fn generate_request(
         request_def.opcode,
     );
 
-    let gathered = gather_request_fields(generator, request_def, &deducible_fields);
+    let gathered = if let Some(v) = gather_request_fields(generator, request_def, &deducible_fields)
+    {
+        v
+    } else {
+        return;
+    };
 
     emit_request_struct(
         generator,
@@ -190,45 +169,10 @@ pub(super) fn generate_request(
         header = generator.ns.header,
         lifetime = lifetime_block
     ));
-    if gathered.has_fds() {
-        enum_cases.request_parse_cases.push(format!(
-            "{header}::{opcode_name}_REQUEST => return \
-             Ok(Request::{ns_prefix}{name}({header}::{name}Request::\
-             try_parse_request_fd(header, remaining, fds)?)),",
-            header = generator.ns.header,
-            opcode_name = super::super::camel_case_to_upper_snake(&name),
-            ns_prefix = ns_prefix,
-            name = name,
-        ));
-    } else {
-        enum_cases.request_parse_cases.push(format!(
-            "{header}::{opcode_name}_REQUEST => return \
-             Ok(Request::{ns_prefix}{name}({header}::{name}Request::try_parse_request(header, \
-             remaining)?)),",
-            header = generator.ns.header,
-            opcode_name = super::super::camel_case_to_upper_snake(&name),
-            ns_prefix = ns_prefix,
-            name = name,
-        ));
-    }
-    emit_request_function(
-        generator,
-        request_def,
-        &name,
-        &function_name,
-        &gathered,
-        x11rb_out,
-    );
-    emit_request_trait_function(
-        generator,
-        request_def,
-        &name,
-        &function_name,
-        &gathered,
-        trait_out,
-    );
+    emit_request_function(request_def, &name, &function_name, &gathered, x11rb_out);
+    emit_request_trait_function(request_def, &name, &function_name, &gathered, trait_out);
 
-    super::special_cases::handle_request(request_def, proto_out);
+    special_cases::handle_request(request_def, proto_out);
 
     outln!(proto_out, "");
     outln!(x11rb_out, "");
@@ -246,11 +190,7 @@ pub(super) fn generate_request(
             ns_prefix = ns_prefix,
             name = name,
             header = generator.ns.header,
-            func = if gathered.reply_has_fds {
-                "parse_reply_fds"
-            } else {
-                "parse_reply"
-            },
+            func = "parse_reply",
             lifetime = if gathered.needs_lifetime { "<'_>" } else { "" }
         ));
         enum_cases.reply_from_cases.push(format!(
@@ -326,7 +266,7 @@ fn generate_aux(
             generator,
             switch_field,
             &aux_name,
-            true,
+            false,
             true,
             Some(&doc),
             out,
@@ -338,6 +278,7 @@ fn generate_aux(
                 out,
                 "/// Create a new instance with all fields unset / not present."
             );
+            outln!(out, "#[must_use]");
             outln!(out, "pub fn new() -> Self {{");
             outln!(out.indent(), "Default::default()");
             outln!(out, "}}");
@@ -392,10 +333,9 @@ fn emit_request_struct(
 ) {
     let ns = request_def.namespace.upgrade().unwrap();
     let is_xproto = ns.header == "xproto";
-    let is_send_event = is_xproto && request_def.name == "SendEvent";
 
     if let Some(ref doc) = request_def.doc {
-        generator.emit_doc(doc, out, Some(deducible_fields));
+        emit_doc(doc, out, Some(deducible_fields));
     }
 
     let mut derives = Derives::all();
@@ -404,25 +344,14 @@ fn emit_request_struct(
     if !derives.is_empty() {
         outln!(out, "#[derive({})]", derives.join(", "));
     }
-    if !gathered.has_fds() {
-        outln!(
-            out,
-            r#"#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]"#
-        );
-    }
 
-    let (struct_lifetime_block, serialize_lifetime_return, parse_lifetime_block) =
-        if gathered.needs_lifetime {
-            ("<'input>", "'input", "'input ")
-        } else {
-            ("", "'static", "")
-        };
+    let (struct_lifetime_block, _serialize_lifetime_return) = if gathered.needs_lifetime {
+        ("<'input>", "'input")
+    } else {
+        ("", "'static")
+    };
 
     let has_members = !gathered.request_args.is_empty();
-    let has_cows = gathered
-        .request_args
-        .iter()
-        .any(|arg| arg.1.needs_any_cow());
     let members_start = if has_members { " {" } else { ";" };
     outln!(
         out,
@@ -432,7 +361,7 @@ fn emit_request_struct(
         members_start = members_start
     );
     out.indented(|out| {
-        for (member_name, member_type) in gathered.request_args.iter() {
+        for (member_name, member_type) in &gathered.request_args {
             outln!(out, "pub {name}: {type},",
                    name=member_name,
                    type=member_type.as_field());
@@ -454,11 +383,11 @@ fn emit_request_struct(
             out,
             "/// Serialize this request into bytes for the provided connection",
         );
+        outln!(out, "#[must_use]",);
         outln!(
             out,
-            "pub fn serialize(self{opcode}) -> BufWithFds<PiecewiseBuf<{lifetime}>> {{",
+            "pub fn serialize(self{opcode}) -> impl AsRef<[u8]> {{",
             opcode = if is_xproto { "" } else { ", major_opcode: u8" },
-            lifetime = serialize_lifetime_return,
         );
         out.indented(|out| {
             let fields = request_def.fields.borrow();
@@ -480,633 +409,601 @@ fn emit_request_struct(
                     }
                 }
             }
-
-            outln!(out, "let length_so_far = 0;");
-
             let mut request_size = fields
                 .iter()
                 .try_fold(0, |sum, field| Some(sum + field.size()?));
+            // If the request is fixed size, keep it on the stack
+            if request_size.is_some() {
+                let mut length = 0;
+                let mut request_slices = Vec::new();
+                let mut fixed_fields_bytes = Vec::new();
+                let mut num_fixed_len_slices = 0;
+                let mut pad_count = 0;
 
-            let mut request_slices = Vec::new();
-            let mut fixed_fields_bytes = Vec::new();
-            let mut num_fixed_len_slices = 0;
-            let mut pad_count = 0;
+                for (field_i, field) in fields.iter().enumerate() {
+                    let mut next_slice = None;
 
-            for (field_i, field) in fields.iter().enumerate() {
-                let mut next_slice = None;
-
-                let mut tmp_out = Output::new();
-                serialize::emit_assert_for_field_serialize(
-                    generator,
-                    field,
-                    deducible_fields,
-                    |field_name| {
-                        let rust_field_name = to_rust_variable_name(field_name);
-                        if !deducible_fields.contains_key(field_name) {
-                            format!("self.{}", rust_field_name)
-                        } else {
-                            rust_field_name
-                        }
-                    },
-                    &mut tmp_out,
-                );
-                match field {
-                    xcbdefs::FieldDef::Pad(pad_field) => match pad_field.kind {
-                        xcbdefs::PadKind::Bytes(bytes) => {
-                            for _ in 0..bytes {
-                                fixed_fields_bytes.push(String::from("0"));
-                            }
-                        }
-                        xcbdefs::PadKind::Align(align) => {
-                            outln!(
-                                tmp_out,
-                                "let padding{} = &[0; {}][..({} - (length_so_far % {})) % {}];",
-                                pad_count,
-                                align - 1,
-                                align,
-                                align,
-                                align,
-                            );
-                            next_slice =
-                                Some((format!("padding{}", pad_count), IovecConversion::Into));
-                            pad_count += 1;
-                        }
-                    },
-                    xcbdefs::FieldDef::Normal(normal_field) => {
-                        if normal_field.name == "major_opcode" {
-                            if ns.ext_info.is_some() {
-                                fixed_fields_bytes.push(String::from("major_opcode"));
+                    let mut tmp_out = Output::new();
+                    serialize::emit_assert_for_field_serialize(
+                        generator,
+                        field,
+                        deducible_fields,
+                        |field_name| {
+                            let rust_field_name = to_rust_variable_name(field_name);
+                            if deducible_fields.contains_key(field_name) {
+                                rust_field_name
                             } else {
+                                format!("self.{}", rust_field_name)
+                            }
+                        },
+                        &mut tmp_out,
+                    );
+                    match field {
+                        xcbdefs::FieldDef::Pad(pad_field) => match pad_field.kind {
+                            xcbdefs::PadKind::Bytes(bytes) => {
+                                for _ in 0..bytes {
+                                    fixed_fields_bytes.push(String::from("0"));
+                                }
+                            }
+                            xcbdefs::PadKind::Align(align) => {
+                                outln!(
+                                    tmp_out,
+                                    "let padding{} = &[0; {}][..({} - (length_so_far % {})) % {}];",
+                                    pad_count,
+                                    align - 1,
+                                    align,
+                                    align,
+                                    align,
+                                );
+                                next_slice =
+                                    Some((format!("padding{}", pad_count), IovecConversion::Into));
+                                pad_count += 1;
+                            }
+                        },
+                        xcbdefs::FieldDef::Normal(normal_field) => {
+                            if normal_field.name == "major_opcode" {
+                                if ns.ext_info.is_some() {
+                                    fixed_fields_bytes.push(String::from("major_opcode"));
+                                } else {
+                                    fixed_fields_bytes.push(format!(
+                                        "{}_REQUEST",
+                                        super::super::camel_case_to_upper_snake(name),
+                                    ));
+                                }
+                            } else if normal_field.name == "minor_opcode" {
+                                assert!(ns.ext_info.is_some());
                                 fixed_fields_bytes.push(format!(
                                     "{}_REQUEST",
                                     super::super::camel_case_to_upper_snake(name),
                                 ));
-                            }
-                        } else if normal_field.name == "minor_opcode" {
-                            assert!(ns.ext_info.is_some());
-                            fixed_fields_bytes.push(format!(
-                                "{}_REQUEST",
-                                super::super::camel_case_to_upper_snake(name),
-                            ));
-                        } else if normal_field.name == "length" {
-                            // the actual length will be calculated later
-                            fixed_fields_bytes.push(String::from("0"));
-                            fixed_fields_bytes.push(String::from("0"));
-                        } else {
-                            let rust_field_name = to_rust_variable_name(&normal_field.name);
+                            } else if normal_field.name == "length" {
+                                // the actual length will be calculated later
+                                fixed_fields_bytes.push(String::from("0"));
+                                fixed_fields_bytes.push(String::from("0"));
+                            } else {
+                                let rust_field_name = to_rust_variable_name(&normal_field.name);
 
-                            let was_deduced = if let Some(deducible_field) =
-                                deducible_fields.get(&normal_field.name)
-                            {
-                                generator.emit_calc_deducible_field(
-                                    field,
-                                    deducible_field,
-                                    |field_name| {
-                                        let rust_field_name = to_rust_variable_name(field_name);
-                                        if !deducible_fields.contains_key(field_name) {
-                                            format!("self.{}", rust_field_name)
-                                        } else {
-                                            rust_field_name
-                                        }
-                                    },
-                                    &rust_field_name,
-                                    out,
-                                );
-                                true
-                            } else {
-                                false
-                            };
-
-                            let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
-                            if let Some(field_size) = normal_field.type_.size() {
-                                let field_name = if was_deduced {
-                                    // If we deduced this value it comes from a local.
-                                    rust_field_name
-                                } else {
-                                    // Otherwise a member.
-                                    format!("self.{}", rust_field_name)
-                                };
-
-                                outln!(
-                                    out,
-                                    "let {} = {};",
-                                    bytes_name,
-                                    serialize::emit_value_serialize(
-                                        generator,
-                                        &normal_field.type_,
-                                        &field_name,
-                                        was_deduced,
-                                    ),
-                                );
-                                for i in 0..field_size {
-                                    fixed_fields_bytes.push(format!("{}[{}]", bytes_name, i));
-                                }
-                            } else {
-                                outln!(
-                                    tmp_out,
-                                    "let {} = self.{}.serialize();",
-                                    bytes_name,
-                                    rust_field_name,
-                                );
-                                next_slice = Some((bytes_name, IovecConversion::Into));
-                            }
-                        }
-                    }
-                    xcbdefs::FieldDef::List(list_field) => {
-                        let rust_field_name = to_rust_variable_name(&list_field.name);
-                        let list_length = list_field.length();
-                        if generator.rust_value_type_is_u8(&list_field.element_type) {
-                            let conversion = if list_length.is_some() {
-                                // If this is a fixed length array we need to erase its length.
-                                IovecConversion::CowStripLength
-                            } else {
-                                IovecConversion::None
-                            };
-                            next_slice = Some((format!("self.{}", rust_field_name), conversion));
-                        } else {
-                            assert_eq!(
-                                list_length, None,
-                                "fixed length arrays in requests must be [u8; N]"
-                            );
-                            let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
-                            if parse::can_use_simple_list_parsing(
-                                generator,
-                                &list_field.element_type,
-                            ) {
-                                outln!(
-                                    tmp_out,
-                                    "let {} = self.{}.serialize();",
-                                    bytes_name,
-                                    rust_field_name,
-                                );
-                            } else {
-                                outln!(tmp_out, "let mut {} = Vec::new();", bytes_name);
-                                outln!(tmp_out, "for element in {}.iter() {{", rust_field_name);
-                                tmp_out.indented(|tmp_out| {
-                                    serialize::emit_value_serialize_into(
-                                        generator,
-                                        &list_field.element_type,
-                                        "element",
-                                        false,
-                                        &bytes_name,
-                                        tmp_out,
+                                let was_deduced = if let Some(deducible_field) =
+                                    deducible_fields.get(&normal_field.name)
+                                {
+                                    generator.emit_calc_deducible_field(
+                                        field,
+                                        deducible_field,
+                                        |field_name| {
+                                            let rust_field_name = to_rust_variable_name(field_name);
+                                            if deducible_fields.contains_key(field_name) {
+                                                rust_field_name
+                                            } else {
+                                                format!("self.{}", rust_field_name)
+                                            }
+                                        },
+                                        &rust_field_name,
+                                        out,
                                     );
-                                });
-                                outln!(tmp_out, "}}");
-                            }
-                            next_slice = Some((bytes_name, IovecConversion::Into));
-                        }
-                    }
-                    xcbdefs::FieldDef::Switch(switch_field) => {
-                        let rust_field_name = to_rust_variable_name(&switch_field.name);
-                        let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
-                        outln!(
-                            tmp_out,
-                            "let {} = self.{}.serialize({});",
-                            bytes_name,
-                            rust_field_name,
-                            generator.ext_params_to_call_args(
-                                false,
-                                |name| {
-                                    if deducible_fields.get(name).is_some() {
-                                        to_rust_variable_name(name)
+                                    true
+                                } else {
+                                    false
+                                };
+                                let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
+                                if let Some(field_size) = normal_field.type_.size() {
+                                    let field_name = if was_deduced {
+                                        // If we deduced this value it comes from a local.
+                                        rust_field_name
                                     } else {
-                                        format!("self.{}", to_rust_variable_name(name))
+                                        // Otherwise a member.
+                                        format!("self.{}", rust_field_name)
+                                    };
+
+                                    outln!(
+                                        out,
+                                        "let {} = {};",
+                                        bytes_name,
+                                        serialize::emit_value_serialize(
+                                            generator,
+                                            &normal_field.type_,
+                                            &field_name,
+                                            was_deduced,
+                                        ),
+                                    );
+                                    for i in 0..field_size {
+                                        fixed_fields_bytes.push(format!("{}[{}]", bytes_name, i));
                                     }
-                                },
-                                &*switch_field.external_params.borrow(),
-                            )
-                        );
-                        if let Some(field_size) = switch_field.size() {
-                            for i in 0..field_size {
-                                fixed_fields_bytes.push(format!("{}[{}]", bytes_name, i));
+                                } else {
+                                    outln!(
+                                        tmp_out,
+                                        "let {} = self.{}.serialize();",
+                                        bytes_name,
+                                        rust_field_name,
+                                    );
+                                    next_slice = Some((bytes_name, IovecConversion::Into));
+                                }
                             }
-                        } else {
-                            next_slice = Some((bytes_name, IovecConversion::Into));
                         }
-                    }
-                    xcbdefs::FieldDef::Fd(_) => {}
-                    xcbdefs::FieldDef::FdList(_) => {}
-                    xcbdefs::FieldDef::Expr(expr_field) => {
-                        let rust_field_name = to_rust_variable_name(&expr_field.name);
-                        let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
-                        let type_ = generator.field_value_type_to_rust_type(&expr_field.type_);
-                        if type_ == "bool" {
+                        xcbdefs::FieldDef::List(list_field) => {
+                            let rust_field_name = to_rust_variable_name(&list_field.name);
+                            let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
                             outln!(
                                 out,
-                                "let {} = {} != 0;",
-                                rust_field_name,
-                                expr_to_str(
-                                    generator,
-                                    &expr_field.expr,
-                                    to_rust_variable_name,
-                                    true,
-                                    Some("u32"),
-                                    true,
-                                ),
+                                "let {} = self.{}.as_ref();",
+                                bytes_name,
+                                rust_field_name
                             );
-                        } else {
-                            // the only case found in the XML definitions is with a bool
-                            unreachable!();
+                            for i in 0..list_field.length().unwrap() {
+                                fixed_fields_bytes.push(format!("{}[{}]", bytes_name, i));
+                            }
                         }
-                        let field_size = expr_field.type_.size().unwrap();
-                        outln!(
-                            out,
-                            "let {} = {};",
-                            bytes_name,
-                            serialize::emit_value_serialize(
-                                generator,
-                                &expr_field.type_,
-                                &rust_field_name,
-                                false,
-                            ),
-                        );
-                        for i in 0..field_size {
-                            fixed_fields_bytes.push(format!("{}[{}]", bytes_name, i));
+                        _ => {}
+                    }
+
+                    // The XML does not describe trailing padding in requests. Requests
+                    // are implicitly padded to a four byte boundary.
+                    if next_slice.is_none() && field_i == (fields.len() - 1) {
+                        if let Some(ref mut request_size) = request_size {
+                            let req_size_rem = *request_size % 4;
+                            if req_size_rem != 0 {
+                                let pad_size = 4 - req_size_rem;
+                                for _ in 0..pad_size {
+                                    fixed_fields_bytes.push(String::from("0"));
+                                }
+                                *request_size += pad_size;
+                            }
                         }
                     }
-                    xcbdefs::FieldDef::VirtualLen(_) => {}
+
+                    if next_slice.is_some() || field_i == (fields.len() - 1) {
+                        if !fixed_fields_bytes.is_empty() {
+                            let maybe_mut = if num_fixed_len_slices == 0 {
+                                // contains the length field, which will be modified
+                                "mut "
+                            } else {
+                                ""
+                            };
+                            outln!(out, "let {}request{} = [", maybe_mut, num_fixed_len_slices,);
+                            for byte in &fixed_fields_bytes {
+                                length += 1;
+                                outln!(out.indent(), "{},", byte);
+                            }
+                            outln!(out, "];");
+                            request_slices.push(format!("request{}.into()", num_fixed_len_slices));
+                            fixed_fields_bytes.clear();
+                            num_fixed_len_slices += 1;
+                        }
+                        if let Some((next_slice, conversion)) = next_slice {
+                            outln!(tmp_out, "let referenced: &[u8] = {}.as_ref();", next_slice,);
+                            outln!(
+                                tmp_out,
+                                "let length_so_far = length_so_far + referenced.len();",
+                            );
+                            match conversion {
+                                IovecConversion::None => request_slices.push(next_slice),
+                                IovecConversion::Into | IovecConversion::CowStripLength => {
+                                    request_slices.push(next_slice.to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    out!(out, "{}", tmp_out.into_data());
                 }
 
                 // The XML does not describe trailing padding in requests. Requests
                 // are implicitly padded to a four byte boundary.
-                if next_slice.is_none() && field_i == (fields.len() - 1) {
-                    if let Some(ref mut request_size) = request_size {
-                        let req_size_rem = *request_size % 4;
-                        if req_size_rem != 0 {
-                            let pad_size = 4 - req_size_rem;
-                            for _ in 0..pad_size {
-                                fixed_fields_bytes.push(String::from("0"));
-                            }
-                            *request_size += pad_size;
-                        }
+                if let Some(request_size) = request_size {
+                    let req_size_rem = request_size % 4;
+                    if req_size_rem != 0 {
+                        assert_eq!(pad_count, 0);
+                        outln!(out, "let padding = vec![0; {}];", 4 - req_size_rem);
+                        outln!(out, "let length_so_far = length_so_far + padding.len();");
+                        request_slices.push(String::from("padding"));
                     }
-                }
-
-                if next_slice.is_some() || field_i == (fields.len() - 1) {
-                    if !fixed_fields_bytes.is_empty() {
-                        let maybe_mut = if num_fixed_len_slices == 0 {
-                            // contains the length field, which will be modified
-                            "mut "
-                        } else {
-                            ""
-                        };
-                        outln!(
-                            out,
-                            "let {}request{} = vec![",
-                            maybe_mut,
-                            num_fixed_len_slices,
-                        );
-                        for byte in fixed_fields_bytes.iter() {
-                            outln!(out.indent(), "{},", byte);
-                        }
-                        outln!(out, "];");
-                        outln!(
-                            out,
-                            "let length_so_far = length_so_far + request{}.len();",
-                            num_fixed_len_slices,
-                        );
-                        request_slices.push(format!("request{}.into()", num_fixed_len_slices));
-                        fixed_fields_bytes.clear();
-                        num_fixed_len_slices += 1;
-                    }
-                    if let Some((next_slice, conversion)) = next_slice {
-                        outln!(
-                            tmp_out,
-                            "let length_so_far = length_so_far + {}.len();",
-                            next_slice,
-                        );
-                        match conversion {
-                            IovecConversion::None => request_slices.push(next_slice),
-                            IovecConversion::Into => {
-                                request_slices.push(format!("{}.into()", next_slice))
-                            }
-                            IovecConversion::CowStripLength => {
-                                request_slices.push(format!("Cow::Owned({}.to_vec())", next_slice))
-                            }
-                        }
-                    }
-                }
-
-                out!(out, "{}", tmp_out.into_data());
-            }
-            // The XML does not describe trailing padding in requests. Requests
-            // are implicitly padded to a four byte boundary.
-            if let Some(request_size) = request_size {
-                let req_size_rem = request_size % 4;
-                if req_size_rem != 0 {
-                    assert_eq!(pad_count, 0);
-                    outln!(out, "let padding = [0; {}];", 4 - req_size_rem);
-                    outln!(out, "let length_so_far = length_so_far + padding.len();");
-                    request_slices.push(String::from("(&padding).into()"));
-                }
-            } else {
-                outln!(
-                    out,
-                    "let padding{} = &[0; 3][..(4 - (length_so_far % 4)) % 4];",
-                    pad_count,
-                );
-                outln!(
-                    out,
-                    "let length_so_far = length_so_far + padding{}.len();",
-                    pad_count,
-                );
-                request_slices.push(format!("padding{}.into()", pad_count));
-            }
-
-            outln!(out, "assert_eq!(length_so_far % 4, 0);");
-            // Set the length in the request.
-            // If it does not fit into u16, compute_length_field will use BigRequests.
-            outln!(
-                out,
-                "let length = u16::try_from(length_so_far / 4).unwrap_or(0);",
-            );
-            outln!(
-                out,
-                "request0[2..4].copy_from_slice(&length.to_ne_bytes());",
-            );
-
-            let fds_arg = if gathered.fd_lists.is_empty() {
-                format!(
-                    "vec![{}]",
-                    gathered
-                        .single_fds
-                        .iter()
-                        .enumerate()
-                        .map(|(i, single_fd)| {
-                            let sep = if i == 0 { "" } else { ", " };
-                            format!("{}self.{}", sep, single_fd)
-                        })
-                        .collect::<String>(),
-                )
-            } else if gathered.fd_lists.len() == 1 && gathered.single_fds.is_empty() {
-                format!("self.{}", gathered.fd_lists[0])
-            } else {
-                outln!(out, "let mut fds = Vec::new();");
-                for field in fields.iter() {
-                    match field {
-                        xcbdefs::FieldDef::Fd(fd_field) => {
-                            outln!(out, "fds.push({});", to_rust_variable_name(&fd_field.name));
-                        }
-                        xcbdefs::FieldDef::FdList(fd_list_field) => {
-                            outln!(
-                                out,
-                                "fds.extend({});",
-                                to_rust_variable_name(&fd_list_field.name)
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-                String::from("fds")
-            };
-
-            let mut slices_arg = String::new();
-            for (i, request_slices) in request_slices.iter().enumerate() {
-                if i != 0 {
-                    slices_arg.push_str(", ");
-                }
-                slices_arg.push_str(request_slices);
-            }
-
-            let result = format!(
-                "(vec![{slices}], {fds})",
-                slices = slices_arg,
-                fds = fds_arg,
-            );
-            outln!(out, "{}", result);
-        });
-        outln!(out, "}}");
-
-        // Parsing implementation.
-        outln!(
-            out,
-            "/// Parse this request given its header, its body, and any fds that go along \
-             with it"
-        );
-        if gathered.has_fds() {
-            outln!(
-                out,
-                "pub fn try_parse_request_fd(header: RequestHeader, value: &{lifetime}[u8], \
-                 fds: &mut Vec<RawFdContainer>) -> Result<Self, ParseError> {{",
-                lifetime = parse_lifetime_block,
-            );
-        } else {
-            outln!(
-                out,
-                "pub fn try_parse_request(header: RequestHeader, value: &{lifetime}[u8]) -> \
-                 Result<Self, ParseError> {{",
-                lifetime = parse_lifetime_block,
-            );
-        }
-        out.indented(|out| {
-            if ns.ext_info.is_some() {
-                // We don't have enough information here to validate the major opcode, that requires
-                // state from the connection.
-                outln!(
-                    out,
-                    "if header.minor_opcode != {}_REQUEST {{",
-                    super::super::camel_case_to_upper_snake(name),
-                );
-                outln!(out.indent(), "return Err(ParseError::InvalidValue);");
-                outln!(out, "}}");
-            } else {
-                // The minor opcode could be repurposed to store data for this request, so there's
-                // no validation of it to be done.
-                outln!(
-                    out,
-                    "if header.major_opcode != {}_REQUEST {{",
-                    super::super::camel_case_to_upper_snake(name),
-                );
-                outln!(out.indent(), "return Err(ParseError::InvalidValue);");
-                outln!(out, "}}");
-            };
-
-            let fields = request_def.fields.borrow();
-            let mut seen_complete_header = false;
-            let mut is_first_body_field = true;
-            for (_, field) in fields.iter().enumerate() {
-                match field.name() {
-                    // These are all in the header. Ignore them.
-                    Some("major_opcode") | Some("minor_opcode") => continue,
-                    Some("length") => {
-                        seen_complete_header = true;
-                        continue;
-                    }
-                    _ => (),
-                }
-
-                let from = if !seen_complete_header {
-                    assert_eq!(field.size(), Some(1));
-                    outln!(out, "let remaining = &[header.minor_opcode];");
-                    "remaining"
-                } else if is_first_body_field {
-                    is_first_body_field = false;
-                    "value"
                 } else {
-                    "remaining"
-                };
-                parse::emit_field_parse(
-                    generator,
-                    field,
-                    "",
-                    from,
-                    FieldContainer::Request(name.to_string()),
-                    out,
+                    outln!(
+                        out,
+                        "let padding{} = &[0; 3][..(4 - (length_so_far % 4)) % 4];",
+                        pad_count,
+                    );
+                    outln!(
+                        out,
+                        "let length_so_far = length_so_far + padding{}.len();",
+                        pad_count,
+                    );
+                    request_slices.push(format!("padding{}", pad_count));
+                }
+                assert_eq!(
+                    length % 4,
+                    0,
+                    "Misaligned struct {}, length={}",
+                    name,
+                    length
                 );
-                if !field
-                    .name()
-                    .map(|field_name| deducible_fields.contains_key(field_name))
-                    .unwrap_or(false)
-                {
-                    parse::emit_field_post_parse(field, out);
-                }
+                let wire_length = length / 4;
 
-                if !seen_complete_header {
-                    // Dispose of the "remaining" variable just generated.
-                    outln!(out, "let _ = remaining;");
-                }
-            }
+                // Set the length in the request.
+                // If it does not fit into u16, there's been a horrible mistake.
+                assert!(
+                    u16::try_from(wire_length).is_ok(),
+                    "Fixed length too long for struct {}, wire_length {}",
+                    name,
+                    wire_length
+                );
+                outln!(
+                    out,
+                    "request0[2..4].copy_from_slice(&({wire_length}u16).to_ne_bytes());",
+                );
 
-            // Silence unused variable warnings for the last component.
-            if !is_first_body_field {
-                outln!(out, "let _ = remaining;");
+                for slice in request_slices.iter().skip(1) {
+                    outln!(out, "request0.extend_from_slice({slice}.as_ref());");
+                }
+                outln!(out, "request0");
             } else {
-                outln!(out, "let _ = value;");
-            }
+                outln!(out, "let length_so_far = 0;");
 
-            // If this is QueryTextExtents we need special handling for odd_length.
-            if ns.header == "xproto" && name == "QueryTextExtents" {
-                outln!(out, "if odd_length {{");
-                out.indented(|out| {
-                    outln!(out, "if string.is_empty() {{");
-                    outln!(out.indent(), "return Err(ParseError::InvalidValue);");
-                    outln!(out, "}}");
-                    outln!(out, "string.truncate(string.len() - 1);");
-                });
-                outln!(out, "}}");
-            }
+                let mut request_slices = Vec::new();
+                let mut fixed_fields_bytes = Vec::new();
+                let mut num_fixed_len_slices = 0;
+                let mut pad_count = 0;
 
-            let has_members = !gathered.request_args.is_empty();
-            let members_start = if has_members { " {" } else { "" };
-            outln!(out, "Ok({}Request{}", name, members_start);
-            out.indented(|out| {
-                for (arg_name, arg_type) in gathered.request_args.iter() {
-                    if arg_type.needs_owned_cow() {
-                        // Types that are parsed from raw bytes must become
-                        // Cow::Owned here because they don't exist outside
-                        // of this function, so we cannot return references
-                        // to them.
-                        outln!(out, "{name}: Cow::Owned({name}),", name = arg_name);
-                    } else if arg_type.needs_borrowed_cow() {
-                        // But raw buffers of bytes can become Cow::Borrowed,
-                        // because the original buffer of bytes still exists
-                        // after we return.
-                        outln!(out, "{name}: Cow::Borrowed({name}),", name = arg_name);
-                    } else {
-                        outln!(out, "{name},", name = arg_name);
-                    }
-                }
-            });
-            let members_end = if has_members { "}" } else { "" };
-            outln!(out, "{})", members_end);
-        });
-        outln!(out, "}}");
-        if has_cows {
-            outln!(out, "/// Clone all borrowed data in this {}Request.", name);
-            outln!(
-                out,
-                "pub fn into_owned(self) -> {}Request<'static> {{",
-                name
-            );
-            out.indented(|out| {
-                outln!(out, "{}Request {{", name);
-                out.indented(|out| {
-                    for (arg_name, arg_type) in gathered.args.iter() {
-                        if arg_type.needs_any_cow() || is_send_event && arg_name == "event" {
+                for (field_i, field) in fields.iter().enumerate() {
+                    let mut next_slice = None;
+
+                    let mut tmp_out = Output::new();
+                    serialize::emit_assert_for_field_serialize(
+                        generator,
+                        field,
+                        deducible_fields,
+                        |field_name| {
+                            let rust_field_name = to_rust_variable_name(field_name);
+                            if deducible_fields.contains_key(field_name) {
+                                rust_field_name
+                            } else {
+                                format!("self.{}", rust_field_name)
+                            }
+                        },
+                        &mut tmp_out,
+                    );
+                    match field {
+                        xcbdefs::FieldDef::Pad(pad_field) => match pad_field.kind {
+                            xcbdefs::PadKind::Bytes(bytes) => {
+                                for _ in 0..bytes {
+                                    fixed_fields_bytes.push(String::from("0"));
+                                }
+                            }
+                            xcbdefs::PadKind::Align(align) => {
+                                outln!(
+                                    tmp_out,
+                                    "let padding{} = &[0; {}][..({} - (length_so_far % {})) % {}];",
+                                    pad_count,
+                                    align - 1,
+                                    align,
+                                    align,
+                                    align,
+                                );
+                                next_slice =
+                                    Some((format!("padding{}", pad_count), IovecConversion::Into));
+                                pad_count += 1;
+                            }
+                        },
+                        xcbdefs::FieldDef::Normal(normal_field) => {
+                            if normal_field.name == "major_opcode" {
+                                if ns.ext_info.is_some() {
+                                    fixed_fields_bytes.push(String::from("major_opcode"));
+                                } else {
+                                    fixed_fields_bytes.push(format!(
+                                        "{}_REQUEST",
+                                        super::super::camel_case_to_upper_snake(name),
+                                    ));
+                                }
+                            } else if normal_field.name == "minor_opcode" {
+                                assert!(ns.ext_info.is_some());
+                                fixed_fields_bytes.push(format!(
+                                    "{}_REQUEST",
+                                    super::super::camel_case_to_upper_snake(name),
+                                ));
+                            } else if normal_field.name == "length" {
+                                // the actual length will be calculated later
+                                fixed_fields_bytes.push(String::from("0"));
+                                fixed_fields_bytes.push(String::from("0"));
+                            } else {
+                                let rust_field_name = to_rust_variable_name(&normal_field.name);
+
+                                let was_deduced = if let Some(deducible_field) =
+                                    deducible_fields.get(&normal_field.name)
+                                {
+                                    generator.emit_calc_deducible_field(
+                                        field,
+                                        deducible_field,
+                                        |field_name| {
+                                            let rust_field_name = to_rust_variable_name(field_name);
+                                            if deducible_fields.contains_key(field_name) {
+                                                rust_field_name
+                                            } else {
+                                                format!("self.{}", rust_field_name)
+                                            }
+                                        },
+                                        &rust_field_name,
+                                        out,
+                                    );
+                                    true
+                                } else {
+                                    false
+                                };
+
+                                let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
+                                if let Some(field_size) = normal_field.type_.size() {
+                                    let field_name = if was_deduced {
+                                        // If we deduced this value it comes from a local.
+                                        rust_field_name
+                                    } else {
+                                        // Otherwise a member.
+                                        format!("self.{}", rust_field_name)
+                                    };
+
+                                    outln!(
+                                        out,
+                                        "let {} = {};",
+                                        bytes_name,
+                                        serialize::emit_value_serialize(
+                                            generator,
+                                            &normal_field.type_,
+                                            &field_name,
+                                            was_deduced,
+                                        ),
+                                    );
+                                    for i in 0..field_size {
+                                        fixed_fields_bytes.push(format!("{}[{}]", bytes_name, i));
+                                    }
+                                } else {
+                                    outln!(
+                                        tmp_out,
+                                        "let {} = self.{}.serialize();",
+                                        bytes_name,
+                                        rust_field_name,
+                                    );
+                                    next_slice = Some((bytes_name, IovecConversion::Into));
+                                }
+                            }
+                        }
+                        xcbdefs::FieldDef::List(list_field) => {
+                            let rust_field_name = to_rust_variable_name(&list_field.name);
+                            let list_length = list_field.length();
+                            if rust_value_type_is_u8(&list_field.element_type) {
+                                let conversion = if list_length.is_some() {
+                                    // If this is a fixed length array we need to erase its length.
+                                    IovecConversion::CowStripLength
+                                } else {
+                                    IovecConversion::None
+                                };
+                                next_slice =
+                                    Some((format!("self.{}", rust_field_name), conversion));
+                            } else {
+                                assert_eq!(
+                                    list_length, None,
+                                    "fixed length arrays in requests must be [u8; N]"
+                                );
+                                let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
+                                if parse::can_use_simple_list_parsing(&list_field.element_type) {
+                                    outln!(
+                                        tmp_out,
+                                        "let {} = self.{}.serialize();",
+                                        bytes_name,
+                                        rust_field_name,
+                                    );
+                                } else {
+                                    outln!(tmp_out, "let mut {} = Vec::new();", bytes_name);
+                                    outln!(tmp_out, "for element in {}.iter() {{", rust_field_name);
+                                    tmp_out.indented(|tmp_out| {
+                                        serialize::emit_value_serialize_into(
+                                            generator,
+                                            &list_field.element_type,
+                                            "element",
+                                            false,
+                                            &bytes_name,
+                                            tmp_out,
+                                        );
+                                    });
+                                    outln!(tmp_out, "}}");
+                                }
+                                next_slice = Some((bytes_name, IovecConversion::Into));
+                            }
+                        }
+                        xcbdefs::FieldDef::Switch(switch_field) => {
+                            let rust_field_name = to_rust_variable_name(&switch_field.name);
+                            let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
+                            outln!(
+                                tmp_out,
+                                "let {} = self.{}.serialize({});",
+                                bytes_name,
+                                rust_field_name,
+                                ext_params_to_call_args(
+                                    false,
+                                    |name| {
+                                        if deducible_fields.get(name).is_some() {
+                                            to_rust_variable_name(name)
+                                        } else {
+                                            format!("self.{}", to_rust_variable_name(name))
+                                        }
+                                    },
+                                    &*switch_field.external_params.borrow(),
+                                )
+                            );
+                            if let Some(field_size) = switch_field.size() {
+                                for i in 0..field_size {
+                                    fixed_fields_bytes.push(format!("{}[{}]", bytes_name, i));
+                                }
+                            } else {
+                                next_slice = Some((bytes_name, IovecConversion::Into));
+                            }
+                        }
+                        xcbdefs::FieldDef::Fd(_)
+                        | xcbdefs::FieldDef::FdList(_)
+                        | xcbdefs::FieldDef::VirtualLen(_) => {}
+                        xcbdefs::FieldDef::Expr(expr_field) => {
+                            let rust_field_name = to_rust_variable_name(&expr_field.name);
+                            let bytes_name = super::postfix_var_name(&rust_field_name, "bytes");
+                            let type_ = generator.field_value_type_to_rust_type(&expr_field.type_);
+                            if type_ == "bool" {
+                                outln!(
+                                    out,
+                                    "let {} = {} != 0;",
+                                    rust_field_name,
+                                    expr_to_str(
+                                        generator,
+                                        &expr_field.expr,
+                                        to_rust_variable_name,
+                                        true,
+                                        Some("u32"),
+                                        true,
+                                    ),
+                                );
+                            } else {
+                                // the only case found in the XML definitions is with a bool
+                                unreachable!();
+                            }
+                            let field_size = expr_field.type_.size().unwrap();
                             outln!(
                                 out,
-                                "{name}: Cow::Owned(self.{name}.into_owned()),",
-                                name = arg_name
+                                "let {} = {};",
+                                bytes_name,
+                                serialize::emit_value_serialize(
+                                    generator,
+                                    &expr_field.type_,
+                                    &rust_field_name,
+                                    false,
+                                ),
                             );
-                        } else {
-                            outln!(out, "{name}: self.{name},", name = arg_name);
+                            for i in 0..field_size {
+                                fixed_fields_bytes.push(format!("{}[{}]", bytes_name, i));
+                            }
                         }
                     }
-                });
-                outln!(out, "}}");
-            });
-            outln!(out, "}}");
-        }
-    });
-    outln!(out, "}}");
-    outln!(
-        out,
-        "impl{lifetime} Request for {name}Request{lifetime} {{",
-        lifetime = struct_lifetime_block,
-        name = name
-    );
-    out.indented(|out| {
-        if is_xproto {
-            outln!(out, "const EXTENSION_NAME: Option<&'static str> = None;");
-        } else {
-            outln!(
-                out,
-                "const EXTENSION_NAME: {option}<&'static str> = Some(X11_EXTENSION_NAME);",
-                option = generator.option_name,
-            );
-        }
 
-        outln!(out, "");
-        let arg_name = if is_xproto {
-            "_major_opcode"
-        } else {
-            "major_opcode"
-        };
-        outln!(
-            out,
-            "fn serialize(self, {opcode}: u8) -> BufWithFds<Vec<u8>> {{",
-            opcode = arg_name
-        );
-        out.indented(|out| {
-            if is_xproto {
-                outln!(out, "let (bufs, fds) = self.serialize();");
-            } else {
-                outln!(out, "let (bufs, fds) = self.serialize(major_opcode);");
+                    // The XML does not describe trailing padding in requests. Requests
+                    // are implicitly padded to a four byte boundary.
+                    if next_slice.is_none() && field_i == (fields.len() - 1) {
+                        if let Some(ref mut request_size) = request_size {
+                            let req_size_rem = *request_size % 4;
+                            if req_size_rem != 0 {
+                                let pad_size = 4 - req_size_rem;
+                                for _ in 0..pad_size {
+                                    fixed_fields_bytes.push(String::from("0"));
+                                }
+                                *request_size += pad_size;
+                            }
+                        }
+                    }
+
+                    if next_slice.is_some() || field_i == (fields.len() - 1) {
+                        if !fixed_fields_bytes.is_empty() {
+                            let maybe_mut = if num_fixed_len_slices == 0 {
+                                // contains the length field, which will be modified
+                                "mut "
+                            } else {
+                                ""
+                            };
+                            outln!(
+                                out,
+                                "let {}request{} = vec![",
+                                maybe_mut,
+                                num_fixed_len_slices,
+                            );
+                            for byte in &fixed_fields_bytes {
+                                outln!(out.indent(), "{},", byte);
+                            }
+                            outln!(out, "];");
+                            outln!(
+                                out,
+                                "let length_so_far = length_so_far + request{}.len();",
+                                num_fixed_len_slices,
+                            );
+                            request_slices.push(format!("request{}.into()", num_fixed_len_slices));
+                            fixed_fields_bytes.clear();
+                            num_fixed_len_slices += 1;
+                        }
+                        if let Some((next_slice, conversion)) = next_slice {
+                            outln!(tmp_out, "let referenced: &[u8] = {}.as_ref();", next_slice,);
+                            outln!(
+                                tmp_out,
+                                "let length_so_far = length_so_far + referenced.len();",
+                            );
+                            match conversion {
+                                IovecConversion::None => request_slices.push(next_slice),
+                                IovecConversion::Into | IovecConversion::CowStripLength => {
+                                    request_slices.push(next_slice.to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    out!(out, "{}", tmp_out.into_data());
+                }
+                // The XML does not describe trailing padding in requests. Requests
+                // are implicitly padded to a four byte boundary.
+                if let Some(request_size) = request_size {
+                    let req_size_rem = request_size % 4;
+                    if req_size_rem != 0 {
+                        assert_eq!(pad_count, 0);
+                        outln!(out, "let padding = vec![0; {}];", 4 - req_size_rem);
+                        outln!(out, "let length_so_far = length_so_far + padding.len();");
+                        request_slices.push(String::from("padding"));
+                    }
+                } else {
+                    outln!(
+                        out,
+                        "let padding{} = &[0; 3][..(4 - (length_so_far % 4)) % 4];",
+                        pad_count,
+                    );
+                    outln!(
+                        out,
+                        "let length_so_far = length_so_far + padding{}.len();",
+                        pad_count,
+                    );
+                    request_slices.push(format!("padding{}", pad_count));
+                }
+
+                outln!(out, "debug_assert_eq!(0, length_so_far % 4);");
+                // Set the length in the request.
+                // If it does not fit into u16, compute_length_field will use BigRequests.
+                outln!(
+                    out,
+                    "let length = u16::try_from(length_so_far / 4).unwrap_or(0);",
+                );
+                outln!(
+                    out,
+                    "request0[2..4].copy_from_slice(&length.to_ne_bytes());",
+                );
+
+                for slice in request_slices.iter().skip(1) {
+                    outln!(out, "request0.extend_from_slice({slice}.as_ref());");
+                }
+                outln!(out, "request0");
             }
-            outln!(out, "// Flatten the buffers into a single vector");
-            outln!(
-                out,
-                "let buf = bufs.iter().flat_map(|buf| buf.iter().copied()).collect();"
-            );
-            outln!(out, "(buf, fds)");
         });
         outln!(out, "}}");
     });
-    outln!(out, "}}");
-
-    let request_trait = if request_def.reply.is_none() {
-        "crate::x11_utils::VoidRequest"
-    } else if gathered.reply_has_fds {
-        "crate::x11_utils::ReplyFDsRequest"
-    } else {
-        "crate::x11_utils::ReplyRequest"
-    };
-    outln!(
-        out,
-        "impl{lifetime} {request_trait} for {name}Request{lifetime} {{",
-        name = name,
-        request_trait = request_trait,
-        lifetime = struct_lifetime_block,
-    );
-    if request_def.reply.is_some() {
-        outln!(out.indent(), "type Reply = {}Reply;", name);
-    };
     outln!(out, "}}");
 }
 
 fn emit_request_function(
-    generator: &NamespaceGenerator<'_, '_>,
     request_def: &xcbdefs::RequestDef,
     name: &str,
     function_name: &str,
@@ -1116,6 +1013,9 @@ fn emit_request_function(
     let ns = request_def.namespace.upgrade().unwrap();
     let is_xproto = ns.header == "xproto";
     let is_list_fonts_with_info = request_def.name == "ListFontsWithInfo" && is_xproto;
+    if is_list_fonts_with_info {
+        return;
+    }
     let is_send_event = request_def.name == "SendEvent" && is_xproto;
     let is_record_enable_context = request_def.name == "EnableContext" && ns.header == "record";
 
@@ -1123,67 +1023,74 @@ fn emit_request_function(
 
     let mut generic_params = String::new();
     if needs_lifetime {
-        generic_params.push_str("'c, 'input, Conn");
-    } else {
-        generic_params.push_str("Conn");
+        generic_params.push_str("'c, 'input");
     }
-    for (param_name, _) in gathered.generics.iter() {
-        generic_params.push_str(", ");
+    for (ind, (param_name, _)) in gathered.generics.iter().enumerate() {
+        if ind == 0 && generic_params.is_empty() {
+        } else {
+            generic_params.push_str(", ");
+        }
         generic_params.push_str(param_name);
     }
 
-    let ret_lifetime = if needs_lifetime { "'c" } else { "'_" };
-    let (ret_type, special_cookie) = if is_list_fonts_with_info || is_record_enable_context {
-        assert!(request_def.reply.is_some());
-        assert!(!gathered.reply_has_fds);
-        let cookie = if is_list_fonts_with_info {
-            "ListFontsWithInfoCookie"
-        } else {
-            "RecordEnableContextCookie"
-        };
-        (format!("{}<{}, Conn>", cookie, ret_lifetime), Some(cookie))
+    let ret_type = if is_list_fonts_with_info || is_record_enable_context {
+        return;
     } else {
-        let ret_type = match (request_def.reply.is_some(), gathered.reply_has_fds) {
-            (false, _) => format!("VoidCookie<{}, Conn>", ret_lifetime),
-            (true, false) => format!("Cookie<{}, Conn, {}Reply>", ret_lifetime, name),
-            (true, true) => format!("CookieWithFds<{}, Conn, {}Reply>", ret_lifetime, name),
+        let ret_type = if request_def.reply.is_some() {
+            format!("Cookie<{}Reply>", name)
+        } else {
+            "VoidCookie".to_owned()
         };
-        (ret_type, None)
+        ret_type
     };
 
     let mut args = String::new();
     if needs_lifetime {
-        args.push_str("conn: &'c Conn");
+        args.push_str("conn: &'c mut SocketConnection");
     } else {
-        args.push_str("conn: &Conn");
+        args.push_str("conn: &mut SocketConnection");
     }
-    for (arg_name, arg_type) in gathered.args.iter() {
+    for (arg_name, arg_type) in &gathered.args {
         args.push_str(", ");
         args.push_str(arg_name);
         args.push_str(": ");
         args.push_str(&arg_type.as_argument());
     }
+    args.push_str(", forget: bool");
 
     if let Some(ref doc) = request_def.doc {
-        generator.emit_doc(doc, out, None);
+        emit_doc(doc, out, None);
     }
-    outln!(
-        out,
-        "pub fn {}<{}>({}) -> Result<{}, ConnectionError>",
-        function_name,
-        generic_params,
-        args,
-        ret_type,
-    );
-    outln!(out, "where");
-    outln!(out.indent(), "Conn: RequestConnection + ?Sized,");
-    for (param_name, where_) in gathered.generics.iter() {
-        outln!(out.indent(), "{}: {},", param_name, where_);
+    if generic_params.is_empty() {
+        outln!(
+            out,
+            "pub fn {}({}) -> Result<{}, ConnectionError>",
+            function_name,
+            args,
+            ret_type,
+        );
+    } else {
+        outln!(
+            out,
+            "pub fn {}<{}>({}) -> Result<{}, ConnectionError>",
+            function_name,
+            generic_params,
+            args,
+            ret_type,
+        );
     }
+
+    if !gathered.generics.is_empty() {
+        outln!(out, "where");
+        for (param_name, where_) in &gathered.generics {
+            outln!(out.indent(), "{}: {},", param_name, where_);
+        }
+    }
+
     outln!(out, "{{");
     #[allow(clippy::cognitive_complexity)]
     out.indented(|out| {
-        for preamble in gathered.preamble.iter() {
+        for preamble in &gathered.preamble {
             outln!(out, "{}", preamble);
         }
 
@@ -1191,7 +1098,7 @@ fn emit_request_function(
         let members_start = if has_members { " {" } else { ";" };
         outln!(out, "let request0 = {}Request{}", name, members_start);
         out.indented(|out| {
-            for (arg_name, arg_type) in gathered.args.iter() {
+            for (arg_name, arg_type) in &gathered.args {
                 if arg_type.needs_any_cow() {
                     // Because the argument is passed in from outside this function,
                     // it is always ok to use a Cow::Borrowed here.
@@ -1207,35 +1114,22 @@ fn emit_request_function(
 
         outln!(
             out,
-            "let (bytes, fds) = request0.serialize({});",
+            "let bytes = request0.serialize({});",
             if is_xproto { "" } else { "major_opcode(conn)?" }
         );
-        outln!(
-            out,
-            "let slices = bytes.iter().map(|b| IoSlice::new(&*b)).collect::<Vec<_>>();"
-        );
-
-        if let Some(cookie) = special_cookie {
+        if request_def.reply.is_some() {
+            outln!(out, "Ok(Cookie::new(conn.write(bytes.as_ref(), forget)?))",);
+        } else {
             outln!(
                 out,
-                "Ok({}::new(conn.send_request_with_reply(&slices, fds)?))",
-                cookie,
-            )
-        } else if request_def.reply.is_some() {
-            if gathered.reply_has_fds {
-                outln!(out, "conn.send_request_with_reply_with_fds(&slices, fds)");
-            } else {
-                outln!(out, "conn.send_request_with_reply(&slices, fds)",);
-            }
-        } else {
-            outln!(out, "conn.send_request_without_reply(&slices, fds)",);
+                "Ok(VoidCookie::new(conn.write(bytes.as_ref(), forget)?))",
+            );
         }
     });
     outln!(out, "}}");
 }
 
 fn emit_request_trait_function(
-    generator: &NamespaceGenerator<'_, '_>,
     request_def: &xcbdefs::RequestDef,
     name: &str,
     function_name: &str,
@@ -1243,9 +1137,7 @@ fn emit_request_trait_function(
     out: &mut Output,
 ) {
     let ns = request_def.namespace.upgrade().unwrap();
-    let is_list_fonts_with_info = request_def.name == "ListFontsWithInfo" && ns.header == "xproto";
     let is_send_event = request_def.name == "SendEvent" && ns.header == "xproto";
-    let is_record_enable_context = request_def.name == "EnableContext" && ns.header == "record";
     let needs_lifetime = gathered.needs_lifetime && !is_send_event;
 
     let mut generic_params = String::new();
@@ -1264,20 +1156,10 @@ fn emit_request_trait_function(
     }
 
     let ret_lifetime = if needs_lifetime { "'c" } else { "'_" };
-    let ret_type = if is_list_fonts_with_info || is_record_enable_context {
-        assert!(request_def.reply.is_some());
-        assert!(!gathered.reply_has_fds);
-        if is_list_fonts_with_info {
-            format!("ListFontsWithInfoCookie<{}, Self>", ret_lifetime)
-        } else {
-            format!("RecordEnableContextCookie<{}, Self>", ret_lifetime)
-        }
+    let ret_type = if request_def.reply.is_some() {
+        format!("VoidCookie<{}, Self>", ret_lifetime)
     } else {
-        match (request_def.reply.is_some(), gathered.reply_has_fds) {
-            (false, _) => format!("VoidCookie<{}, Self>", ret_lifetime),
-            (true, false) => format!("Cookie<{}, Self, {}Reply>", ret_lifetime, name),
-            (true, true) => format!("CookieWithFds<{}, Self, {}Reply>", ret_lifetime, name),
-        }
+        format!("Cookie<{}, Self, {}Reply>", ret_lifetime, name)
     };
 
     let mut args = String::new();
@@ -1286,7 +1168,7 @@ fn emit_request_trait_function(
     } else {
         args.push_str("&self");
     }
-    for (arg_name, arg_type) in gathered.args.iter() {
+    for (arg_name, arg_type) in &gathered.args {
         args.push_str(", ");
         args.push_str(arg_name);
         args.push_str(": ");
@@ -1300,7 +1182,7 @@ fn emit_request_trait_function(
     };
 
     if let Some(ref doc) = request_def.doc {
-        generator.emit_doc(doc, out, Default::default());
+        emit_doc(doc, out, Option::default());
     }
     outln!(
         out,
@@ -1313,14 +1195,14 @@ fn emit_request_trait_function(
     );
     if !gathered.generics.is_empty() {
         outln!(out, "where");
-        for (param_name, where_) in gathered.generics.iter() {
+        for (param_name, where_) in &gathered.generics {
             outln!(out.indent(), "{}: {},", param_name, where_);
         }
     }
     outln!(out, "{{");
 
     let mut call_args = String::from("self");
-    for (arg_name, _) in gathered.args.iter() {
+    for (arg_name, _) in &gathered.args {
         call_args.push_str(", ");
         call_args.push_str(arg_name);
     }
@@ -1345,7 +1227,7 @@ fn gather_request_fields(
     generator: &NamespaceGenerator<'_, '_>,
     request_def: &xcbdefs::RequestDef,
     deducible_fields: &HashMap<String, DeducibleField>,
-) -> GatheredRequestFields {
+) -> Option<GatheredRequestFields> {
     let mut letter_iter = b'A'..=b'Z';
 
     let mut needs_lifetime = false;
@@ -1362,16 +1244,14 @@ fn gather_request_fields(
     let is_send_event = request_def.name == "SendEvent" && ns.header == "xproto";
 
     for field in request_def.fields.borrow().iter() {
-        if !generator.field_is_visible(field, deducible_fields) {
+        if !field_is_visible(field, deducible_fields) {
             continue;
         }
-        match field.name() {
-            Some("major_opcode") | Some("minor_opcode") | Some("length") => continue,
-            _ => {}
+        if let Some("major_opcode" | "minor_opcode" | "length") = field.name() {
+            continue;
         }
 
         match field {
-            xcbdefs::FieldDef::Pad(_) => unreachable!(),
             xcbdefs::FieldDef::Normal(normal_field) => {
                 let rust_field_name = to_rust_variable_name(&normal_field.name);
                 let rust_field_type = generator.field_value_type_to_rust_type(&normal_field.type_);
@@ -1380,8 +1260,7 @@ fn gather_request_fields(
                     || (is_change_property && normal_field.name == "type")
                 {
                     true
-                } else if generator
-                    .use_enum_type_in_field(&normal_field.type_)
+                } else if crate::generator::namespace::use_enum_type_in_field(&normal_field.type_)
                     .is_none()
                 {
                     !matches!(normal_field.type_.value_set, xcbdefs::FieldValueSet::None)
@@ -1422,25 +1301,24 @@ fn gather_request_fields(
                     let element_type =
                         generator.field_value_type_to_rust_type(&list_field.element_type);
                     let rust_field_name = to_rust_variable_name(&list_field.name);
-                    let rust_field_type =
-                        if generator.rust_value_type_is_u8(&list_field.element_type) {
-                            if let Some(list_len) = list_field.length() {
-                                Type::VariableOwnershipRawBytes(format!(
-                                    "[{}; {}]",
-                                    element_type, list_len
-                                ))
-                            } else {
-                                Type::VariableOwnershipRawBytes(format!("[{}]", element_type))
-                            }
+                    let rust_field_type = if rust_value_type_is_u8(&list_field.element_type) {
+                        if let Some(list_len) = list_field.length() {
+                            Type::VariableOwnershipRawBytes(format!(
+                                "[{}; {}]",
+                                element_type, list_len
+                            ))
                         } else {
-                            assert_eq!(
-                                list_field.length(),
-                                None,
-                                "Fixed length arrays of types other than u8 are not implemented"
-                            );
+                            Type::VariableOwnershipRawBytes(format!("[{}]", element_type))
+                        }
+                    } else {
+                        assert_eq!(
+                            list_field.length(),
+                            None,
+                            "Fixed length arrays of types other than u8 are not implemented"
+                        );
 
-                            Type::VariableOwnership(format!("[{}]", element_type))
-                        };
+                        Type::VariableOwnership(format!("[{}]", element_type))
+                    };
                     args.push((rust_field_name.clone(), rust_field_type.clone()));
                     request_args.push((rust_field_name, rust_field_type));
                 }
@@ -1476,33 +1354,31 @@ fn gather_request_fields(
                 request_args.push((rust_field_name, Type::Simple("Vec<RawFdContainer>".into())));
                 fd_lists.push(fd_list_field.name.clone());
             }
-            xcbdefs::FieldDef::Expr(_) => unreachable!(),
-            xcbdefs::FieldDef::VirtualLen(_) => unreachable!(),
+            xcbdefs::FieldDef::Expr(_)
+            | xcbdefs::FieldDef::Pad(_)
+            | xcbdefs::FieldDef::VirtualLen(_) => unreachable!(),
         }
     }
 
-    let reply_has_fds = request_def
-        .reply
-        .as_ref()
-        .map(|reply_def| {
-            reply_def.fields.borrow().iter().any(|field| {
-                matches!(
-                    field,
-                    xcbdefs::FieldDef::Fd(_) | xcbdefs::FieldDef::FdList(_)
-                )
-            })
+    let reply_has_fds = request_def.reply.as_ref().map_or(false, |reply_def| {
+        reply_def.fields.borrow().iter().any(|field| {
+            matches!(
+                field,
+                xcbdefs::FieldDef::Fd(_) | xcbdefs::FieldDef::FdList(_)
+            )
         })
-        .unwrap_or(false);
+    });
 
     assert_eq!(args.len(), request_args.len());
-    GatheredRequestFields {
-        reply_has_fds,
-        needs_lifetime,
-        args,
-        request_args,
-        generics,
-        preamble,
-        single_fds,
-        fd_lists,
+    if reply_has_fds || !single_fds.is_empty() || !fd_lists.is_empty() {
+        None
+    } else {
+        Some(GatheredRequestFields {
+            needs_lifetime,
+            args,
+            request_args,
+            generics,
+            preamble,
+        })
     }
 }
