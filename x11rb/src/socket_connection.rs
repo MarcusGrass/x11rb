@@ -242,7 +242,7 @@ impl SocketConnection {
         }
         self.keep_seqs.clear();
         #[cfg(feature = "debug")]
-        if self.reply_cache.is_empty() {
+        if !self.reply_cache.is_empty() {
             crate::debug!("Forgetting {} replies", self.reply_cache.len());
         }
         self.reply_cache.clear();
@@ -271,12 +271,15 @@ impl SocketConnection {
             Ok(Some(cached))
         } else {
             let start = Instant::now();
-            let mut target = None;
-            while start.elapsed() < timeout && target.is_none() {
+            let mut got_event = false;
+            while start.elapsed() < timeout && !got_event {
                 if poll_readable(self.sock_fd, timeout - start.elapsed()) {
                     for rr in self.buf.read_next()? {
                         match rr {
-                            ReadResult::Event(e) => target = Some(e),
+                            ReadResult::Event(e) => {
+                                got_event = true;
+                                self.event_cache.push_back(e);
+                            },
                             ReadResult::Reply(seq, buf) => {
                                 crate::debug!("Got reply on seq {seq}");
                                 if self.keep_seqs.remove(&seq) {
@@ -312,7 +315,7 @@ impl SocketConnection {
                     }
                 }
             }
-            Ok(target)
+            Ok(self.event_cache.pop_front())
         }
     }
 
@@ -582,6 +585,10 @@ impl SockBuf {
         let packet_length = 32 + additional_length;
         if self.write_offset - self.read_offset < packet_length {
             // Need more data
+            #[cfg(feature = "debug")]
+            if self.read_offset != self.write_offset {
+                crate::debug!("Need more data wo = {} ro = {}, len = {}", self.write_offset, self.read_offset, packet_length);
+            }
             None
         } else {
             // Got at least one full packet
