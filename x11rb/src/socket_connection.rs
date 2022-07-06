@@ -279,7 +279,7 @@ impl SocketConnection {
                             ReadResult::Event(e) => {
                                 got_event = true;
                                 self.event_cache.push_back(e);
-                            },
+                            }
                             ReadResult::Reply(seq, buf) => {
                                 crate::debug!("Got reply on seq {seq}");
                                 if self.keep_seqs.remove(&seq) {
@@ -546,10 +546,11 @@ impl SockBuf {
         while let Some(rr) = self.drain_next() {
             read_results.push(rr);
         }
-        let remainder = self.byte_buf[self.read_offset..self.write_offset].to_vec();
-        self.byte_buf[..remainder.len()].copy_from_slice(&remainder);
+        let remainder_len = self.write_offset - self.read_offset;
+        self.byte_buf
+            .copy_within(self.read_offset..self.write_offset, 0);
         self.read_offset = 0;
-        self.write_offset = remainder.len();
+        self.write_offset = remainder_len;
         Ok(read_results)
     }
 
@@ -587,7 +588,12 @@ impl SockBuf {
             // Need more data
             #[cfg(feature = "debug")]
             if self.read_offset != self.write_offset {
-                crate::debug!("Need more data wo = {} ro = {}, len = {}", self.write_offset, self.read_offset, packet_length);
+                crate::debug!(
+                    "Need more data wo = {} ro = {}, len = {}",
+                    self.write_offset,
+                    self.read_offset,
+                    packet_length
+                );
             }
             None
         } else {
