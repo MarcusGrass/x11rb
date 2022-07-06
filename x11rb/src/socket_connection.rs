@@ -35,7 +35,7 @@ pub struct SocketConnection {
     keep_seqs: FnvIndexSet<u16, CACHE_SIZE>,
     id_allocator: IdAllocator,
     max_request_length: usize,
-    pub(crate) extensions: ExtensionInfoProvider,
+    pub extensions: ExtensionInfoProvider,
 }
 
 impl SocketConnection {
