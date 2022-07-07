@@ -10,6 +10,16 @@ macro_rules! debug {
 macro_rules! debug {
     ($($arg:tt)*) => {{}};
 }
+
+#[must_use]
+pub fn get_hostname() -> Option<String> {
+    let mut buf = vec![0; 256]; // linux max hostname is 253 chars
+    nix::unistd::gethostname(&mut buf)
+        .ok()
+        .and_then(|s| s.to_str().ok())
+        .map(std::string::ToString::to_string)
+}
+
 mod pretty_printer {
     use core::fmt::{Debug, Formatter, Result};
 

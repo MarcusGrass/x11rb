@@ -143,6 +143,9 @@ impl WmSizeHintsCookie {
             false,
         )?))
     }
+    pub fn forget(self, conn: &mut SocketConnection) {
+        self.0.forget(conn);
+    }
 }
 
 // Possible flags for `WM_SIZE_HINTS`.

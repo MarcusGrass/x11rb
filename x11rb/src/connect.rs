@@ -3,6 +3,7 @@
 use crate::errors::{ConnectError, ParseError};
 use crate::protocol::xproto::{Setup, SetupAuthenticate, SetupFailed, SetupRequest};
 use crate::x11_utils::{Serialize, TryParse};
+use crate::xauth::{get_auth, Family};
 use std::convert::TryFrom;
 use std::fmt::Debug;
 
@@ -31,6 +32,23 @@ impl Connect {
         Self {
             buffer: vec![0; INITIAL_CAPACITY],
             advanced: 0,
+        }
+    }
+
+    /// Create a new `Connect` from the information necessary to connect to the X11 server.
+    ///
+    /// This returns the connection handshake object as well as the setup request to send to the server.
+    pub fn new(
+        family: Family,
+        address: &[u8],
+        display: u16,
+    ) -> Result<(Self, Vec<u8>), ConnectError> {
+        match get_auth(family, address, display)? {
+            Some((name, data)) => Ok(Self::with_authorization(name, data)),
+            None => {
+                // fall through to no authorization
+                Ok(Self::with_authorization(Vec::new(), Vec::new()))
+            }
         }
     }
 

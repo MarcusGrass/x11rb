@@ -20,9 +20,10 @@ pub mod properties;
 pub mod protocol;
 pub mod resource_manager;
 mod socket_connection;
-mod utils;
+pub mod utils;
 mod wrapper;
 pub mod x11_utils;
+pub mod xauth;
 pub mod xcb;
 
 use crate::protocol::xproto::{Keysym, Timestamp};

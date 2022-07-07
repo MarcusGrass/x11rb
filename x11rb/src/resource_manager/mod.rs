@@ -8,6 +8,7 @@ use crate::SocketConnection;
 use std::ffi::OsString;
 
 pub mod protocol;
+use crate::utils::get_hostname;
 use crate::x11_utils::{TryParse, X11Error};
 use protocol::Database;
 
@@ -62,6 +63,6 @@ pub fn new_from_resource_manager(
 pub fn new_from_default(conn: &mut SocketConnection) -> Result<Database, ReplyError> {
     Ok(Database::new_from_default(
         &send_request(conn)?,
-        OsString::from("localhost"), // TODO: Maybe fix?
+        OsString::from(get_hostname().unwrap_or_else(|| "localhost".to_string())), // TODO: Maybe fix?
     ))
 }

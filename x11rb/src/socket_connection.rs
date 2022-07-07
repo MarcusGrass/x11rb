@@ -1,18 +1,4 @@
-use crate::connect::Connect;
-use crate::cookie::VoidCookie;
-use crate::errors::ConnectionError;
-use crate::errors::{ConnectError, ReplyOrIdError};
-use crate::id_allocator::IdAllocator;
-use crate::parse_display::ConnectAddress;
-use crate::protocol::xproto::{Atom, PropMode, Setup, Window, GE_GENERIC_EVENT};
-use crate::x11_utils::{ExtensionInfoProvider, ExtensionInformation};
-use crate::xcb::xproto::GetInputFocusRequest;
-
-use heapless::{FnvIndexMap, FnvIndexSet};
-use nix::libc::c_int;
-use nix::poll::{poll, PollFd, PollFlags};
 use std::borrow::Cow;
-
 use std::collections::VecDeque;
 use std::convert::{TryFrom, TryInto};
 use std::io::{Read, Write};
@@ -21,21 +7,67 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::prelude::RawFd;
 use std::time::{Duration, Instant};
 
-const CACHE_SIZE: usize = 256;
+use nix::libc::c_int;
+use nix::poll::{poll, PollFd, PollFlags};
+use smallmap::{Map, Set};
+
+use crate::connect::Connect;
+use crate::cookie::VoidCookie;
+use crate::errors::ConnectionError;
+use crate::errors::{ConnectError, ReplyOrIdError};
+use crate::id_allocator::IdAllocator;
+use crate::protocol::xproto::{Atom, PropMode, Setup, Window, GE_GENERIC_EVENT};
+use crate::utils::get_hostname;
+use crate::x11_utils::{ExtensionInfoProvider, ExtensionInformation};
+use crate::xauth::Family;
+use crate::xcb::xproto::GetInputFocusRequest;
 
 #[derive(Debug)]
 pub struct SocketConnection {
     buf: SockBuf,
     setup: Setup,
     sock_fd: RawFd,
-    cur_seq: u16,
-    expected_reply_seq: u16,
+    seq_count: SeqCount,
     event_cache: VecDeque<Vec<u8>>,
-    reply_cache: FnvIndexMap<u16, Vec<u8>, CACHE_SIZE>,
-    keep_seqs: FnvIndexSet<u16, CACHE_SIZE>,
+    reply_cache: Map<u16, Vec<u8>>,
+    keep_seqs: Set<u16>,
     id_allocator: IdAllocator,
     max_request_length: usize,
     pub extensions: ExtensionInfoProvider,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct SeqCount {
+    cur: u16,
+    seen: u16,
+}
+
+impl SeqCount {
+    fn new() -> Self {
+        Self { cur: 1, seen: 1 }
+    }
+
+    #[inline]
+    // A strictly less than here is kind of dubious as sequences wrap.
+    // However, this is only used to potentially skip a sync so it doesn't really matter
+    // since it only has false negatives.
+    fn sequence_has_been_seen(self, seq: u16) -> bool {
+        seq < self.seen
+    }
+
+    #[inline]
+    fn get_and_increment(&mut self) -> u16 {
+        let last = self.cur;
+        self.cur = self.cur.overflowing_add(1).0;
+        last
+    }
+
+    #[inline]
+    // Events are sequential so this shouldn't be callable out of order messing with
+    // sequence has been seen logic
+    fn record_seen(&mut self, seq: u16) {
+        self.seen = seq;
+    }
 }
 
 impl SocketConnection {
@@ -48,79 +80,77 @@ impl SocketConnection {
         // works.
         let mut error = None;
 
-        for addr in parsed_display.connect_instruction() {
-            if let ConnectAddress::Socket(path) = addr {
-                match UnixStream::connect(path) {
-                    Ok(mut socket) => {
-                        let (mut connect, setup_request) =
-                            Connect::with_authorization(vec![], vec![]);
-                        // write the connect() setup request
-                        let mut nwritten = 0;
-                        while nwritten != setup_request.len() {
-                            // poll returned successfully, so the stream is writable.
-                            match socket.write(&setup_request[nwritten..]) {
-                                Ok(0) => {
-                                    return Err(std::io::Error::new(
-                                        std::io::ErrorKind::WriteZero,
-                                        "failed to write whole buffer",
-                                    )
-                                    .into())
-                                }
-                                Ok(n) => nwritten += n,
-                                // Spurious wakeup from poll, try again
-                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                                Err(e) => return Err(e.into()),
+        if let Some(path) = parsed_display.connect_instruction() {
+            match UnixStream::connect(path) {
+                Ok(mut socket) => {
+                    let family = Family::LOCAL;
+                    let host = get_hostname().unwrap_or_else(|| "localhost".to_string());
+                    let (mut connect, setup_request) =
+                        Connect::new(family, host.as_bytes(), parsed_display.display)?;
+                    // write the connect() setup request
+                    let mut nwritten = 0;
+                    while nwritten != setup_request.len() {
+                        // poll returned successfully, so the stream is writable.
+                        match socket.write(&setup_request[nwritten..]) {
+                            Ok(0) => {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::WriteZero,
+                                    "failed to write whole buffer",
+                                )
+                                .into());
                             }
+                            Ok(n) => nwritten += n,
+                            // Spurious wakeup from poll, try again
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(e) => return Err(e.into()),
                         }
+                    }
 
-                        // read in the setup
-                        loop {
-                            let adv = match socket.read(connect.buffer()) {
-                                Ok(0) => {
-                                    return Err(std::io::Error::new(
-                                        std::io::ErrorKind::UnexpectedEof,
-                                        "failed to read whole buffer",
-                                    )
-                                    .into())
-                                }
-                                Ok(n) => n,
-                                // Spurious wakeup from poll, try again
-                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    continue
-                                }
-                                Err(e) => return Err(e.into()),
-                            };
-
-                            // advance the internal buffer
-                            if connect.advance(adv) {
-                                break;
+                    // read in the setup
+                    loop {
+                        let adv = match socket.read(connect.buffer()) {
+                            Ok(0) => {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "failed to read whole buffer",
+                                )
+                                .into());
                             }
-                        }
+                            Ok(n) => n,
+                            // Spurious wakeup from poll, try again
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                continue;
+                            }
+                            Err(e) => return Err(e.into()),
+                        };
 
-                        // resolve the setup
-                        let setup = connect.into_setup()?;
-
-                        // Check that we got a valid screen number
-                        if screen >= setup.roots.len() {
-                            return Err(ConnectError::InvalidScreen);
+                        // advance the internal buffer
+                        if connect.advance(adv) {
+                            break;
                         }
-                        let sock_fd = socket.as_raw_fd();
-                        let mut con = SocketConnection::new(SockBuf::new(socket), setup, sock_fd);
-                        // TODO: Better err
-                        con.init_extensions()
-                            .map_err(|_| ConnectError::UnknownError)?;
-                        con.check_for_big_req()
-                            .map_err(|_| ConnectError::UnknownError)?;
-                        return Ok((con, screen));
                     }
-                    Err(e) => {
-                        error = Some(e);
-                        continue;
+
+                    // resolve the setup
+                    let setup = connect.into_setup()?;
+
+                    // Check that we got a valid screen number
+                    if screen >= setup.roots.len() {
+                        return Err(ConnectError::InvalidScreen);
                     }
+                    let sock_fd = socket.as_raw_fd();
+                    let mut con = SocketConnection::new(SockBuf::new(socket), setup, sock_fd);
+                    // TODO: Better err
+                    con.init_extensions()
+                        .map_err(|_| ConnectError::UnknownError)?;
+                    con.check_for_big_req()
+                        .map_err(|_| ConnectError::UnknownError)?;
+                    return Ok((con, screen));
+                }
+                Err(e) => {
+                    error = Some(e);
                 }
             }
         }
-
         // none of the addresses worked
         Err(match error {
             Some(e) => ConnectError::IoError(e),
@@ -131,12 +161,10 @@ impl SocketConnection {
     pub(crate) fn write(&mut self, buf: &[u8], forget: bool) -> Result<u16, ConnectionError> {
         let updated = update_length_field(buf, self.max_request_length)?;
         self.buf.write(&updated)?;
-        let sent_seq = self.cur_seq;
-        if !forget && self.keep_seqs.insert(sent_seq).is_err() {
-            // TODO: Remove
-            crate::debug!("Set full on write! {:?}", self.keep_seqs);
+        let sent_seq = self.seq_count.get_and_increment();
+        if !forget {
+            self.keep_seqs.insert(sent_seq, ());
         }
-        self.cur_seq = self.cur_seq.overflowing_add(1).0;
         Ok(sent_seq)
     }
 
@@ -153,13 +181,11 @@ impl SocketConnection {
         seq: u16,
     ) -> Result<Option<Vec<u8>>, ConnectionError> {
         self.keep_seqs.remove(&seq);
-        if self.expected_reply_seq > seq {
-            Ok(None)
-        } else {
+        if !self.seq_count.sequence_has_been_seen(seq) {
             let sync_seq = self.write(GetInputFocusRequest.serialize().as_ref(), false)?;
             let _ = self.block_for_reply(sync_seq)?;
-            Ok(self.reply_cache.remove(&seq))
         }
+        Ok(self.reply_cache.remove(&seq))
     }
 
     /// Check cache if we already have the sequence otherwise read from the socket until we get it
@@ -178,16 +204,10 @@ impl SocketConnection {
                         ReadResult::Reply(got_seq, buf) => {
                             if got_seq == seq {
                                 target = Some(buf);
-                            } else if self.keep_seqs.remove(&got_seq) {
-                                #[allow(clippy::collapsible_if)]
-                                if self.reply_cache.insert(got_seq, buf).is_err() {
-                                    // TODO: Remove
-                                    crate::debug!(
-                                        "Map full on block for reply {:?}",
-                                        self.reply_cache
-                                    );
-                                }
+                            } else if self.keep_seqs.remove(&got_seq).is_some() {
+                                self.reply_cache.insert(got_seq, buf);
                             }
+                            self.seq_count.record_seen(got_seq);
                         }
                         ReadResult::Error(got_seq, buf) => {
                             crate::debug!(
@@ -196,16 +216,10 @@ impl SocketConnection {
                             );
                             if got_seq == seq {
                                 target = Some(buf);
-                            } else if self.keep_seqs.remove(&got_seq) {
-                                #[allow(clippy::collapsible_if)]
-                                if self.reply_cache.insert(got_seq, buf).is_err() {
-                                    // TODO: Remove
-                                    crate::debug!(
-                                        "Map full on block for reply {:?}",
-                                        self.reply_cache
-                                    );
-                                }
+                            } else if self.keep_seqs.remove(&got_seq).is_some() {
+                                self.reply_cache.insert(got_seq, buf);
                             }
+                            self.seq_count.record_seen(got_seq);
                         }
                     }
                 }
@@ -234,33 +248,30 @@ impl SocketConnection {
         }
     }
 
-    pub fn sync(&mut self) -> Result<(), ConnectionError> {
-        self.drain()?;
-        #[cfg(feature = "debug")]
+    #[cfg(feature = "debug")]
+    pub fn clear_cache(&mut self) -> Result<(), ConnectionError> {
+        if self.keep_seqs.is_empty() && self.reply_cache.is_empty() {
+            return Ok(());
+        }
         if !self.keep_seqs.is_empty() {
-            crate::debug!("Forgetting {} kept seqs", self.keep_seqs.len());
+            let sync_seq = self.write(GetInputFocusRequest.serialize().as_ref(), false)?;
+            let _ = self.block_for_reply(sync_seq)?;
         }
-        self.keep_seqs.clear();
-        #[cfg(feature = "debug")]
-        if !self.reply_cache.is_empty() {
-            crate::debug!("Forgetting {} replies", self.reply_cache.len());
+        for (seq, _) in self.keep_seqs.iter() {
+            crate::debug!("Dropped voidcookie {seq}");
         }
-        self.reply_cache.clear();
-        Ok(())
-    }
-
-    fn drain(&mut self) -> Result<(), ConnectionError> {
-        let sync_seq = self.write(GetInputFocusRequest.serialize().as_ref(), false)?;
-        let _ = self.block_for_reply(sync_seq)?;
-        #[cfg(feature = "debug")]
-        for (_, reply) in &self.reply_cache {
-            if let Ok(err) = crate::x11_utils::X11Error::try_parse(reply, &self.extensions) {
-                crate::debug!("Drained err {err:?}");
+        for (seq, reply) in self.reply_cache.iter() {
+            if reply[0] == ERROR {
+                crate::debug!(
+                    "Dropped error on seq {seq}! {:?}",
+                    crate::x11_utils::X11Error::try_parse(reply, &self.extensions)
+                );
             } else {
-                crate::debug!("Drained something that's not an err");
+                crate::debug!("Dropped reply on seq {seq}!");
             }
         }
-        Ok(())
+        crate::debug!("Panicking because of leak!");
+        panic!("Leaked replies;")
     }
 
     pub fn read_next_event(
@@ -282,34 +293,20 @@ impl SocketConnection {
                             }
                             ReadResult::Reply(seq, buf) => {
                                 crate::debug!("Got reply on seq {seq}");
-                                if self.keep_seqs.remove(&seq) {
-                                    #[allow(clippy::collapsible_if)]
-                                    if self.reply_cache.insert(seq, buf).is_err() {
-                                        crate::debug!(
-                                            "Map full on read next {:?}",
-                                            self.reply_cache
-                                        );
-                                    }
+                                if self.keep_seqs.remove(&seq).is_some() {
+                                    self.reply_cache.insert(seq, buf);
                                 }
-                                self.expected_reply_seq =
-                                    self.expected_reply_seq.overflowing_add(1).0;
+                                self.seq_count.record_seen(seq);
                             }
                             ReadResult::Error(seq, buf) => {
                                 crate::debug!(
                                     "Got err {:?}",
                                     crate::x11_utils::X11Error::try_parse(&buf, &self.extensions)
                                 );
-                                if self.keep_seqs.remove(&seq) {
-                                    #[allow(clippy::collapsible_if)]
-                                    if self.reply_cache.insert(seq, buf).is_err() {
-                                        crate::debug!(
-                                            "Map full on read next {:?}",
-                                            self.reply_cache
-                                        );
-                                    };
+                                if self.keep_seqs.remove(&seq).is_some() {
+                                    self.reply_cache.insert(seq, buf);
                                 }
-                                self.expected_reply_seq =
-                                    self.expected_reply_seq.overflowing_add(1).0;
+                                self.seq_count.record_seen(seq);
                             }
                         }
                     }
@@ -470,11 +467,10 @@ impl SocketConnection {
             id_allocator: IdAllocator::new(setup.resource_id_base, setup.resource_id_mask).unwrap(),
             setup,
             sock_fd,
-            cur_seq: 1,
-            expected_reply_seq: 1,
+            seq_count: SeqCount::new(),
             event_cache: VecDeque::new(),
-            reply_cache: FnvIndexMap::new(),
-            keep_seqs: FnvIndexSet::new(),
+            reply_cache: Map::new(),
+            keep_seqs: Map::new(),
             extensions: ExtensionInfoProvider::default(),
         }
     }
@@ -530,7 +526,7 @@ enum ReadResult {
 impl SockBuf {
     fn new(sock: UnixStream) -> Self {
         Self {
-            byte_buf: vec![0; BUF_SIZE],
+            byte_buf: vec![0u8; BUF_SIZE],
             write_offset: 0,
             read_offset: 0,
             sock,

@@ -20,8 +20,9 @@ exclude = [
 ]
 
 [dependencies]
-nix = { version = "0.24.1", default-features = false, features = ["socket", "uio", "poll"] }
-heapless = { version = "0.7.14", default-features = false }
+smallmap = { version = "1.4.0", default-features = false }
+nix = { version = "0.24.1", default-features = false, features = ["hostname", "poll"] }
+heapless = { version = "0.7.15", default-features = false }
 
 [features]
 default = []
@@ -98,3 +99,10 @@ features = [
     "image",
     "resource_manager",
 ]
+
+[dev-dependencies]
+tiny-bench = "0.1.0"
+
+[[bench]]
+name = "benchmark"
+harness = false
